@@ -60,15 +60,15 @@ Signing stays off until `runtime.json` sets `relay.enabled`, a gas budget, a max
 
 | Variable | Purpose |
 | --- | --- |
-| `PHASE2_MAINNET_ASSOCIATION_SET_FILE` / `PHASE2_MAINNET_ASSOCIATION_SET_MIRROR_URL` | Association set. Third-party relays point `FILE` at any path and fetch from the public mirror; root and digest are recomputed against the chain, so the mirror is untrusted transport |
+| `PHASE2_MAINNET_ASSOCIATION_SET_FILE` / `PHASE2_MAINNET_ASSOCIATION_SET_MIRROR_URL` | Association set. Third-party relays point `FILE` at any path and fetch from the public mirror `https://lincolnprotocol.com/asp/` (the trailing slash is required); root and digest are recomputed against the chain, so the mirror is untrusted transport |
 | `PHASE2_MAINNET_RPC_FILE` | Optional file holding a private RPC URL (mode 0600). Without it the official public RPC is used |
-| `PHASE2_MAINNET_POINTS_SEASON` | Enables points receipts: after a job confirms, your keystore signs an EIP-712 receipt for the user's claim address |
-| `PHASE2_MAINNET_POINTS_URL` | Optional points service URL to forward receipts to |
+| `PHASE2_MAINNET_POINTS_SEASON` | Enables points receipts: after a job confirms, your keystore signs an EIP-712 receipt for the user's claim address. Use `season-1` |
+| `PHASE2_MAINNET_POINTS_URL` | Optional points service URL to forward receipts to. There is no public points service yet: leave it unset, and `GET /v3/jobs/{id}` keeps the signed receipt (`pointsReceipt`, `pointsStatus`) for later submission |
 | `PHASE2_MAINNET_SERVICE_FEES_FILE` | Your fee policy. Swaps must use a fee adapter and match its rate |
 
 ## Staking
 
-Listing a relay for discovery, points and the 20% relay share requires a stake of 5,000,000 LINCOLN in the relay stake registry, with a 14-day unbonding period and no slashing. The registry address is announced separately. Running a relay does not need the stake: the pools accept any processor.
+Listing a relay for discovery, points and the 20% relay share requires a stake of 5,000,000 LINCOLN in the relay stake registry, with a 14-day unbonding period and no slashing. The registry is `RelayStakeRegistry` at [`0x1429f7BAA41baee9d6C7989DBdDc4C6344c8204B`](https://robinhoodchain.blockscout.com/address/0x1429f7BAA41baee9d6C7989DBdDc4C6344c8204B) on chain 4663; register and manage your relay at https://app.lincolnprotocol.com/relay. Running a relay does not need the stake: the pools accept any processor.
 
 Points count only fees the treasury Safe receives. A fee your relay keeps for itself earns no points for you or your users, and the relay signs no receipt for it (`pointsStatus: no-fee`). Your relay share is 20% of the points of the treasury-received fees in the jobs you process, in practice the 30 bps adapter fee on swaps. Only the relay that processed a fee can sign its receipt.
 
