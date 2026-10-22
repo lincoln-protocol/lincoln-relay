@@ -57,6 +57,13 @@ export function mainnetContainerMirrorEnvironment(env={}){
   }
   return result;
 }
+// Points receipts are opt-in; the API server re-checks both values and requires signing.
+export function mainnetContainerPointsEnvironment(env={}){
+  if(env.PHASE2_MAINNET_POINTS_SEASON===undefined){need(env.PHASE2_MAINNET_POINTS_URL===undefined,'MAINNET_POINTS_SEASON_REQUIRED');return {};}
+  need(/^[a-z0-9][a-z0-9_-]{0,63}$/.test(env.PHASE2_MAINNET_POINTS_SEASON),'MAINNET_POINTS_SEASON_INVALID');
+  need(env.PHASE2_MAINNET_POINTS_URL===undefined||/^https:\/\/[^\s/?#]+$/.test(env.PHASE2_MAINNET_POINTS_URL),'MAINNET_POINTS_URL_INVALID');
+  return {PHASE2_MAINNET_POINTS_SEASON:env.PHASE2_MAINNET_POINTS_SEASON,...(env.PHASE2_MAINNET_POINTS_URL===undefined?{}:{PHASE2_MAINNET_POINTS_URL:env.PHASE2_MAINNET_POINTS_URL})};
+}
 export function mainnetContainerIndexerEnvironment(env={}){
   need(env.PHASE2_ASP_PONDER_URL===undefined||env.PHASE2_ASP_PONDER_URL==='http://indexer:44663/','MAINNET_CONTAINER_INDEXER_URL_INVALID');
   need(env.PHASE2_ASP_PONDER_MODE===undefined||env.PHASE2_ASP_PONDER_MODE==='logs','MAINNET_PONDER_LOGS_ONLY_REQUIRED');
@@ -194,7 +201,7 @@ function mainnetAPIEnvironment(config,plan,{poolId,apiPort,rpcEnv,indexerEnv}){
     PHASE2_MAINNET_SIGNING_ENABLED:plan.signingEnabled?'1':'0',PHASE2_MAINNET_MAX_GAS:plan.maxGas,
     PHASE2_MAINNET_ALLOWED_HOSTS:config.network.allowedHosts.length?config.network.allowedHosts.join(','):undefined,PHASE2_MAINNET_ALLOWED_ORIGINS:config.network.allowedOrigins.length?config.network.allowedOrigins.join(','):undefined,
     PHASE2_MAINNET_ASSOCIATION_SET_FILE:`${plan.associationDirectory}/current.json`,PHASE2_MAINNET_PUBLISHER_STATUS_FILE:`${plan.associationDirectory}/publisher-heartbeat.json`,
-    PHASE2_MAINNET_MIN_PUBLISH_INTERVAL_SECONDS:String(config.publisher.publication.minPublishIntervalSeconds),...rpcEnv,...indexerEnv,...mainnetContainerMirrorEnvironment(process.env)};
+    PHASE2_MAINNET_MIN_PUBLISH_INTERVAL_SECONDS:String(config.publisher.publication.minPublishIntervalSeconds),...rpcEnv,...indexerEnv,...mainnetContainerMirrorEnvironment(process.env),...mainnetContainerPointsEnvironment(process.env)};
   if(plan.budgetWei!==null)Object.assign(runtimeEnv,{PHASE2_MAINNET_GAS_BUDGET_WEI:plan.budgetWei,PHASE2_MAINNET_MAX_FEE_PER_GAS_WEI:plan.maxFeePerGasWei,PHASE2_MAINNET_RESERVE_WEI:plan.reserveWei});
   if(plan.signingEnabled)Object.assign(runtimeEnv,{PHASE2_MAINNET_KEYSTORE_FILE:plan.keystoreFile,PHASE2_MAINNET_PASSWORD_FILE:plan.passwordFile});
   const serviceFeesFile=mainnetServiceFeeFile(config,poolId);

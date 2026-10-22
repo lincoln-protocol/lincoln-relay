@@ -108,12 +108,12 @@ export async function prepareMainnetASPRuntime(env=process.env,{preparationScope
     if(signingEnabled)need(Number(Boolean(env.PHASE2_MAINNET_KEYSTORE_ACCOUNT))+Number(Boolean(env.PHASE2_MAINNET_KEYSTORE_FILE))===1&&env.PHASE2_MAINNET_PASSWORD_FILE,'MAINNET_EXPLICIT_KEYSTORE_REQUIRED');
   }
   // Optional points receipts, signed by the relay keystore after confirmation.
-  let pointsReceipts=null;
+  // Only the plain settings cross the runtime ticket; the signer is built at start.
+  let points=null;
   if(env.PHASE2_MAINNET_POINTS_SEASON!==undefined){
     need(signingEnabled,'MAINNET_POINTS_SIGNING_REQUIRED');need(/^[a-z0-9][a-z0-9_-]{0,63}$/.test(env.PHASE2_MAINNET_POINTS_SEASON),'MAINNET_POINTS_SEASON_INVALID');
     need(env.PHASE2_MAINNET_POINTS_URL===undefined||/^https?:\/\/[^\s/?#]+$/.test(env.PHASE2_MAINNET_POINTS_URL),'MAINNET_POINTS_URL_INVALID');
-    pointsReceipts={season:env.PHASE2_MAINNET_POINTS_SEASON,forwardUrl:env.PHASE2_MAINNET_POINTS_URL??null,
-      signer:overrides.pointsSigner??createCastTypedDataSigner({address:profile.relayer,account:env.PHASE2_MAINNET_KEYSTORE_ACCOUNT,keystoreFile:env.PHASE2_MAINNET_KEYSTORE_FILE,passwordFile:env.PHASE2_MAINNET_PASSWORD_FILE})};
+    points={season:env.PHASE2_MAINNET_POINTS_SEASON,forwardUrl:env.PHASE2_MAINNET_POINTS_URL??null};
   }
   const routes=config.routesByPool?.[poolId]??[];
   need(Array.isArray(routes),'MAINNET_ROUTES_INVALID');
@@ -136,7 +136,7 @@ export async function prepareMainnetASPRuntime(env=process.env,{preparationScope
   need(Number.isSafeInteger(port)&&port>=0&&port<=65535&&['127.0.0.1','0.0.0.0','::1'].includes(host),'MAINNET_LISTEN_OPTIONS_INVALID');
   const networkPolicy=createNetworkPolicy({PHASE1_ALLOWED_HOSTS:env.PHASE2_MAINNET_ALLOWED_HOSTS,PHASE1_ALLOWED_ORIGINS:env.PHASE2_MAINNET_ALLOWED_ORIGINS});
   need(runtimeTickets.authority(preparationScope)===authority,'MAINNET_RUNTIME_PREPARATION_CLOSED_OR_FOREIGN');
-  return runtimeTickets.issue(preparationScope,env,{root,poolId,...structuredClone({profile,serviceFeePolicy,gasPricingPolicy,runtimeArtifacts,routes}),signingEnabled,maxGas,host,port,networkPolicy,hasLedgerConfiguration});
+  return runtimeTickets.issue(preparationScope,env,{root,poolId,...structuredClone({profile,serviceFeePolicy,gasPricingPolicy,runtimeArtifacts,routes,points}),signingEnabled,maxGas,host,port,networkPolicy,hasLedgerConfiguration});
 }
 
 export async function startMainnetASPRuntime(env=process.env,overrides={}){
@@ -144,7 +144,7 @@ export async function startMainnetASPRuntime(env=process.env,overrides={}){
   if(overrides.preparedRuntime===undefined)return withMainnetRuntimePreparation(async scope=>startMainnetASPRuntime(env,{...overrides,preparedRuntime:await prepareMainnetASPRuntime(env,{preparationScope:scope})}));
   // This is not an object-based verification bypass: only a still-open startup
   // transaction can mint a private, exact-environment, single-use capability.
-  const {root,poolId,profile,serviceFeePolicy,gasPricingPolicy,runtimeArtifacts,routes,signingEnabled,maxGas,host,port,networkPolicy,hasLedgerConfiguration}=runtimeTickets.consume(overrides.preparedRuntime,env);
+  const {root,poolId,profile,serviceFeePolicy,gasPricingPolicy,runtimeArtifacts,routes,points,signingEnabled,maxGas,host,port,networkPolicy,hasLedgerConfiguration}=runtimeTickets.consume(overrides.preparedRuntime,env);
   const rpcClient=overrides.client??await createMainnetRuntimeClient({env,expectedGenesisHash:profile.genesisHash});
   const client=env.PHASE2_ASP_PONDER_URL?createPhase2PonderClient({client:rpcClient,profile,baseURL:env.PHASE2_ASP_PONDER_URL,
     mode:'logs',fallbackToRpc:env.PHASE2_ASP_PONDER_FALLBACK!=='reject'}):rpcClient;
@@ -156,6 +156,8 @@ export async function startMainnetASPRuntime(env=process.env,overrides={}){
     budgetWei:env.PHASE2_MAINNET_GAS_BUDGET_WEI,maxFeePerGasWei:env.PHASE2_MAINNET_MAX_FEE_PER_GAS_WEI,reserveWei:env.PHASE2_MAINNET_RESERVE_WEI,expectedGenesisHash:profile.genesisHash,root};
   const executor=signingEnabled||hasLedgerConfiguration?(overrides.executorGroup===undefined?createMainnetSigner(executorOptions):
     mainnetAPIExecutorFor(overrides.executorGroup,executorOptions)):null;
+  const pointsReceipts=points===null?null:{...points,signer:overrides.pointsSigner??createCastTypedDataSigner({address:profile.relayer,
+    account:env.PHASE2_MAINNET_KEYSTORE_ACCOUNT,keystoreFile:env.PHASE2_MAINNET_KEYSTORE_FILE,passwordFile:env.PHASE2_MAINNET_PASSWORD_FILE})};
   const quoteRoute=overrides.quoteRoute??(async options=>{const {quotePhase2Route}=await import('../phase2-asp/quote.mjs');return quotePhase2Route(options);});
   const assetPriceSource=gasPricingPolicy?.priceFeed?await createTwapPriceSource({client:rpcClient,policy:gasPricingPolicy.priceFeed}):null;
   try{return await createMainnetASPService({client,profile,artifacts:runtimeArtifacts,executor,signingEnabled,routes,quoteRoute,serviceFeePolicy,gasPricingPolicy,assetPriceSource,publisherStatusLoader,pointsReceipts,maxGas,host,port,networkPolicy,
