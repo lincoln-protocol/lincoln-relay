@@ -5,7 +5,7 @@ Relay service for the [Lincoln](https://docs.lincolnprotocol.com/token/tokenomic
 A relay receives a proof that a user generated in their own wallet, checks it against the chain, and submits the transaction from the relay's address so the user never has to fund a public wallet. The pools bind `processor`, `recipient`, `feeRecipient`, `fee` and the amounts into the proof, so a relay cannot redirect funds, change the fee, or replay a proof under a different address. The worst a relay can do is refuse or delay a job; the user then proves again for another relay.
 
 - Operator guide: https://docs.lincolnprotocol.com/token/relay-operators
-- Contracts, circuits and the public release: [Lincoln-protocol-core](https://github.com/LincolnProtocol-com/Lincoln-protocol-core)
+- Contracts, circuits and the public release: [Lincoln-protocol-core](https://github.com/lincoln-protocol/Lincoln-protocol-core)
 
 ## What is in this repository
 
@@ -30,7 +30,7 @@ npm run check                      # offline: modules load, image allowlist, pro
 docker build -f docker/mainnet/runtime.Dockerfile -t lincoln-relay:reviewed .
 
 # 2. Public release (contract artifacts, final proving keys, sources) from Lincoln-protocol-core
-git clone https://github.com/LincolnProtocol-com/Lincoln-protocol-core
+git clone https://github.com/lincoln-protocol/Lincoln-protocol-core
 (cd Lincoln-protocol-core/releases/rc3 && npm ci --ignore-scripts)
 node docker/mainnet/stage-public-release.mjs /abs/mainnet-public-release   # run with releases/rc3 as the working directory's repo root; see below
 
