@@ -24,14 +24,18 @@ On a Linux server (4 GB of RAM or more, ports 80 and 443 open) with a DNS name p
 
 ```sh
 echo 'https://your-rpc-provider.example/v2/KEY' > rpc-url    # your own Robinhood Chain RPC
-curl -fsSL https://raw.githubusercontent.com/lincoln-protocol/lincoln-relay/main/install.sh \
-  | sudo bash -s -- --pool lincoln --domain relay.example.com --owner 0xYourOwnerWallet --rpc-url-file ./rpc-url
+curl -fsSLO https://raw.githubusercontent.com/lincoln-protocol/lincoln-relay/<release commit>/install.sh
+echo '<install.sh sha256 from the release notes>  install.sh' | sha256sum -c -
+sudo bash install.sh --pool lincoln --domain relay.example.com --owner 0xYourOwnerWallet --rpc-url-file ./rpc-url
 ```
+
+Take the release commit and the checksum from the [latest release](https://github.com/lincoln-protocol/lincoln-relay/releases), and read the script before you run it as root.
 
 The installer:
 - installs Docker if it is missing (it asks first);
-- builds the relay image from this repository;
-- stages the public release from `Lincoln-protocol-core` (`v0.1.0-rc.3`);
+- builds the relay image from the exact lincoln-relay commit pinned in the script, and stops if the checkout differs;
+- stages the public release from `Lincoln-protocol-core` `v0.1.0-rc.3`, pinned by its full commit in the same way;
+- pulls the Node, Foundry and Caddy images by digest;
 - creates the relay key on the server and prints its address;
 - writes the config;
 - starts the relay read-only behind Caddy, which obtains the TLS certificate for `https://<domain>`.
@@ -43,7 +47,7 @@ Then:
 2. Send ETH for gas to the relay address, then run `lincoln-relay signing on`.
 3. Register at https://app.lincolnprotocol.com/relay from your owner wallet with the relay address, the endpoint, and the consent the installer printed (`lincoln-relay consent <owner>` signs a new one).
 
-`lincoln-relay status | health | logs | address | signing on|off | up | down` manages it afterwards. Rerunning the installer updates the code and keeps the key, state and RPC file.
+`lincoln-relay status | health | logs | address | signing on|off | up | down` manages it afterwards. Running a newer release's installer updates the code and keeps the key, state and RPC file.
 
 ## Run a relay by hand
 

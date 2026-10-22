@@ -16,7 +16,12 @@ set -Eeuo pipefail
 
 RELAY_REPO=${LINCOLN_RELAY_REPO:-https://github.com/lincoln-protocol/lincoln-relay.git}
 CORE_REPO=${LINCOLN_CORE_REPO:-https://github.com/lincoln-protocol/Lincoln-protocol-core.git}
+# Exact sources this installer builds. Each checkout is verified against the full commit and the
+# install stops on any mismatch. RELAY_COMMIT is the release's source commit; the release tag sits
+# on the next commit, which only writes this pin.
+RELAY_COMMIT=__RELAY_COMMIT__
 CORE_TAG=v0.1.0-rc.3
+CORE_COMMIT=b2febe03c0604c1f0dbeeed393f2157f48f3dc1c
 MAINNET_RPC=https://rpc.mainnet.chain.robinhood.com/
 MIRROR_URL=https://lincolnprotocol.com/asp/
 POINTS_SEASON=season-1
@@ -27,14 +32,14 @@ REGISTRY=0xfF986c58e467De9862BF97a1c2782D4b263C8307
 # release check only needs a well-formed address; it does not enter any verified source.
 MAINNET_DEPLOYER=0x36437b878415EdA1a24186CF79AFffBc9ecEd298
 NODE_IMAGE=node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
-CADDY_IMAGE=caddy:2.10.0-alpine
+CADDY_IMAGE=caddy:2.10.0-alpine@sha256:ae4458638da8e1a91aafffb231c5f8778e964bca650c8a8cb23a7e8ac557aa3c
 APP_UID=10001
 
 POOL=
 DOMAIN=
 OWNER=
 DIR=/opt/lincoln-relay
-REF=main
+REF=
 RPC_URL_FILE=
 EMAIL=
 TLS=auto
@@ -56,7 +61,8 @@ Usage: install.sh --pool <id> --domain <host> [options]
   --budget-eth <n>       total gas the relay may spend before it stops (default 0.1)
   --max-fee-gwei <n>     highest max fee per gas it signs (default 0.1)
   --reserve-eth <n>      ETH it always leaves in the wallet (default 0.001)
-  --ref <git ref>        lincoln-relay version to build (default main)
+  --ref <git ref>        build another lincoln-relay version instead of the pinned release commit
+                         (unpinned; for testing only)
   --tls <auto|internal>  internal uses a local CA, for testing only (default auto)
   --yes                  do not ask before installing Docker
 EOF
@@ -129,9 +135,20 @@ fetch(){ local url=$1 dest=$2 ref=$3
   if [ -d "$dest/.git" ]; then git -C "$dest" fetch -q --tags origin; else git clone -q "$url" "$dest"; fi
   # A branch name resolves to the freshly fetched remote branch; a tag or commit resolves as is.
   git -C "$dest" checkout -q --detach "origin/$ref" 2>/dev/null || git -C "$dest" checkout -q --detach "$ref"; }
-say "Fetching lincoln-relay ($REF)"; fetch "$RELAY_REPO" "$DIR/src" "$REF"
+# Check out exactly this commit, or stop.
+fetch_pinned(){ local url=$1 dest=$2 commit=$3 head
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "invalid pinned commit '$commit'"
+  fetch "$url" "$dest" "$commit"
+  head=$(git -C "$dest" rev-parse HEAD)
+  [ "$head" = "$commit" ] || die "$url checked out $head, expected $commit; not installing"; }
+if [ -n "$REF" ]; then
+  warn "--ref $REF builds an unpinned lincoln-relay version"
+  say "Fetching lincoln-relay ($REF)"; fetch "$RELAY_REPO" "$DIR/src" "$REF"
+else
+  say "Fetching lincoln-relay ($RELAY_COMMIT)"; fetch_pinned "$RELAY_REPO" "$DIR/src" "$RELAY_COMMIT"
+fi
 COMMIT=$(git -C "$DIR/src" rev-parse --short=12 HEAD)
-say "Fetching Lincoln-protocol-core ($CORE_TAG)"; fetch "$CORE_REPO" "$DIR/core" "$CORE_TAG"
+say "Fetching Lincoln-protocol-core ($CORE_TAG, $CORE_COMMIT)"; fetch_pinned "$CORE_REPO" "$DIR/core" "$CORE_COMMIT"
 
 FEES=$DIR/src/config/mainnet-fees
 [ -f "$FEES/service-fees-$POOL.json" ] || die "unknown pool '$POOL'; choose one of: $(ls "$FEES" | sed -n 's/^service-fees-\(.*\)\.json$/\1/p' | tr '\n' ' ')"
