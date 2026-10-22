@@ -19,7 +19,7 @@ CORE_REPO=${LINCOLN_CORE_REPO:-https://github.com/lincoln-protocol/Lincoln-proto
 # Exact sources this installer builds. Each checkout is verified against the full commit and the
 # install stops on any mismatch. RELAY_COMMIT is the release's source commit; the release tag sits
 # on the next commit, which only writes this pin.
-RELAY_COMMIT=__RELAY_COMMIT__
+RELAY_COMMIT=a6a8cd3ace46bc0077eab5c8387d2612fca93f36
 CORE_TAG=v0.1.0-rc.3
 CORE_COMMIT=b2febe03c0604c1f0dbeeed393f2157f48f3dc1c
 MAINNET_RPC=https://rpc.mainnet.chain.robinhood.com/
