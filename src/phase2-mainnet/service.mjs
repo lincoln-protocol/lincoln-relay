@@ -153,7 +153,8 @@ export async function createMainnetASPService({client,profile,artifacts,director
   async function issuePoints(job,intent,receipt){
     try{
       if(job.pointsReceipt===undefined){
-        const log=findRelayFeeLog(receipt.logs??[],{kind:intent.kind,pool:profile.pool.address,adapter:intent.routeEntry?.route?.adapter??null,processor,feeRecipients});
+        // Points count only fees the treasury Safe received, so a fee this relay keeps gets no receipt.
+        const log=findRelayFeeLog(receipt.logs??[],{kind:intent.kind,pool:profile.pool.address,adapter:intent.routeEntry?.route?.adapter??null,processor,feeRecipients:[TREASURY_SAFE]});
         if(!log){job.pointsStatus='no-fee';job.pointsReceipt=null;return;}
         job.pointsReceipt=await points.sign({chainId:4663,season:points.season,txHash:job.hash,logIndex:log.logIndex,claimant:job.points.claimant,referrer:job.points.referrer});job.pointsStatus='issued';
       }

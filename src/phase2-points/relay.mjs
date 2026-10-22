@@ -36,9 +36,10 @@ export function normalizePointsIssuer(input,{relayer}){
 }
 
 /** Locate the one public fee log of a confirmed relay transaction.
- * Pool fees: the log's processor is this relay and the payee is one the relay
- * accepts (itself or the treasury Safe). Swap fees come from the adapter.
- * Returns null when the job paid no official service fee (ragequit, zero fee).
+ * Pool fees: the log's processor is this relay and the payee is one of
+ * feeRecipients (the relay passes only the treasury Safe: a fee a relay keeps
+ * earns no points). Swap fees come from the adapter.
+ * Returns null when the job paid no official service fee (ragequit, zero fee, kept fee).
  */
 export function findRelayFeeLog(logs,{kind,pool,adapter=null,processor,feeRecipients=[processor]}){
   const payees=new Set(feeRecipients.map(a=>String(a).toLowerCase()));
