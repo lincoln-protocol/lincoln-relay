@@ -96,7 +96,7 @@ Signing stays off until `runtime.json` sets `relay.enabled`, a gas budget, a max
 
 ## Staking
 
-Listing a relay for discovery, points and the 20% relay share requires a stake of 5,000,000 LINCOLN in the relay stake registry, with a 14-day unbonding period and no slashing. The registry is being upgraded so that a cold owner wallet holds the stake and the relay server key has no staking powers; its address is announced at launch. Do not stake in the earlier deployment `0x1429f7BAA41baee9d6C7989DBdDc4C6344c8204B`. Running a relay does not need the stake: the pools accept any processor.
+Listing a relay for discovery, points and the 20% relay share requires a stake of 5,000,000 LINCOLN in `RelayStakeRegistryV2` at `0xfF986c58e467De9862BF97a1c2782D4b263C8307` (from block 95221645), with a 14-day unbonding period and no slashing. A cold owner wallet (it may be a Safe) stakes, controls the listing and receives every withdrawal; the relay server key has no staking powers. It only signs a one-time EIP-712 consent to be listed under that owner: `lincoln-relay consent <owner>` prints it, and the installer prints it for `--owner`. If the server key leaks, the owner rotates the listing to a new key with `rotateRelayer`. Do not stake in the retired first deployment `0x1429f7BAA41baee9d6C7989DBdDc4C6344c8204B`. Running a relay does not need the stake: the pools accept any processor.
 
 Points count only fees the treasury Safe receives. A fee your relay keeps for itself earns no points for you or your users, and the relay signs no receipt for it (`pointsStatus: no-fee`). Your relay share is 20% of the points of the treasury-received fees in the jobs you process, in practice the 30 bps adapter fee on swaps. Only the relay that processed a fee can sign its receipt.
 

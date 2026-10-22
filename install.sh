@@ -21,8 +21,8 @@ MAINNET_RPC=https://rpc.mainnet.chain.robinhood.com/
 MIRROR_URL=https://lincolnprotocol.com/asp/
 POINTS_SEASON=season-1
 REGISTER_URL=https://app.lincolnprotocol.com/relay
-# RelayStakeRegistryV2; empty until it is deployed, then consent is signed here.
-REGISTRY=
+# RelayStakeRegistryV2 on Robinhood Chain mainnet (block 95221645); the relay key signs its consent for it.
+REGISTRY=0xfF986c58e467De9862BF97a1c2782D4b263C8307
 # Public deployer of the pools. The frozen rc3 release leaves it null, and the relay's
 # release check only needs a well-formed address; it does not enter any verified source.
 MAINNET_DEPLOYER=0x36437b878415EdA1a24186CF79AFffBc9ecEd298
