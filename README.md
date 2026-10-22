@@ -68,7 +68,7 @@ Signing stays off until `runtime.json` sets `relay.enabled`, a gas budget, a max
 
 ## Staking
 
-Listing a relay for discovery, points and the 20% relay share requires a stake of 5,000,000 LINCOLN in the relay stake registry, with a 14-day unbonding period and no slashing. The registry is `RelayStakeRegistry` at [`0x1429f7BAA41baee9d6C7989DBdDc4C6344c8204B`](https://robinhoodchain.blockscout.com/address/0x1429f7BAA41baee9d6C7989DBdDc4C6344c8204B) on chain 4663; register and manage your relay at https://app.lincolnprotocol.com/relay. Running a relay does not need the stake: the pools accept any processor.
+Listing a relay for discovery, points and the 20% relay share requires a stake of 5,000,000 LINCOLN in the relay stake registry, with a 14-day unbonding period and no slashing. The registry is being upgraded so that a cold owner wallet holds the stake and the relay server key has no staking powers; its address is announced at launch. Do not stake in the earlier deployment `0x1429f7BAA41baee9d6C7989DBdDc4C6344c8204B`. Running a relay does not need the stake: the pools accept any processor.
 
 Points count only fees the treasury Safe receives. A fee your relay keeps for itself earns no points for you or your users, and the relay signs no receipt for it (`pointsStatus: no-fee`). Your relay share is 20% of the points of the treasury-received fees in the jobs you process, in practice the 30 bps adapter fee on swaps. Only the relay that processed a fee can sign its receipt.
 
