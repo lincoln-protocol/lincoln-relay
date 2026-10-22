@@ -1,0 +1,32 @@
+{
+  "schema": "lincoln-service-fees/v2",
+  "id": "mainnet-lincoln-30bps-extension-279453e19afb",
+  "feeAsset": "current-pool-asset",
+  "gasFeeUnits": "216291677824447990422",
+  "withdrawal": {
+    "bps": 30,
+    "includesGas": true
+  },
+  "holderExit": {
+    "bps": 30,
+    "includesGas": true
+  },
+  "ragequit": {
+    "bps": 0,
+    "includesGas": false
+  },
+  "privateTransfer": {
+    "fixedUnits": "0",
+    "includesGas": true
+  },
+  "swap": {
+    "bps": 30,
+    "treasury": "0x9cf17a6e3c75d200f58283a165c442a8a3994555",
+    "immutable": true,
+    "includesGas": false
+  },
+  "deposit": {
+    "bps": 0,
+    "includesGas": false
+  }
+}

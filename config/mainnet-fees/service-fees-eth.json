@@ -1,0 +1,94 @@
+{
+  "schema": "lincoln-relay-pricing/v1",
+  "serviceFees": {
+    "schema": "lincoln-service-fees/v2",
+    "id": "mainnet-eth-30bps-gas-994296d7f03a-v2",
+    "feeAsset": "current-pool-asset",
+    "gasFeeUnits": "20000000000000",
+    "withdrawal": {
+      "bps": 30,
+      "includesGas": true
+    },
+    "holderExit": {
+      "bps": 30,
+      "includesGas": true
+    },
+    "ragequit": {
+      "bps": 0,
+      "includesGas": false
+    },
+    "privateTransfer": {
+      "fixedUnits": "0",
+      "includesGas": true
+    },
+    "swap": {
+      "bps": 30,
+      "treasury": "0x9cf17a6e3c75d200f58283a165c442a8a3994555",
+      "immutable": true,
+      "includesGas": false
+    },
+    "deposit": {
+      "bps": 0,
+      "includesGas": false
+    }
+  },
+  "gasPricing": {
+    "schema": "lincoln-relay-gas-pricing/v1",
+    "id": "mainnet-eth-basefee-billing-v2",
+    "quoteTTLSeconds": 120,
+    "maxGasPriceWei": "100000000",
+    "maxGasUnits": "5000000",
+    "gasBufferBps": 0,
+    "gasModels": {
+      "withdrawal": {
+        "0": "600000",
+        "1": "1200000",
+        "2": "1720000"
+      },
+      "private-transfer": {
+        "0": "600000",
+        "1": "1250000",
+        "2": "1720000"
+      },
+      "holder-exit": "350000",
+      "swap": "2500000"
+    },
+    "assetPrices": [],
+    "priceFeed": {
+      "schema": "lincoln-mainnet-twap-prices/v1",
+      "id": "eth-route-twap-30m-v1",
+      "windowSeconds": 1800,
+      "refreshSeconds": 60,
+      "maxAgeSeconds": 180,
+      "confirmationBlocks": 30,
+      "maxSpotDeviationBps": 200,
+      "haircutBps": 500,
+      "markets": [
+        {
+          "id": "usdg",
+          "minNativeBalanceWei": "1000000000000000000000",
+          "minLiquidity": "1000000000000000000",
+          "minHarmonicLiquidity": "1000000000000000000"
+        },
+        {
+          "id": "pons",
+          "minNativeBalanceWei": "25000000000000000000",
+          "minLiquidity": "20000000000000000000000",
+          "minHarmonicLiquidity": "20000000000000000000000"
+        },
+        {
+          "id": "cashcat",
+          "minNativeBalanceWei": "25000000000000000000",
+          "minLiquidity": "50000000000000000000000",
+          "minHarmonicLiquidity": "50000000000000000000000"
+        }
+      ]
+    },
+    "billingGasPrice": {
+      "schema": "lincoln-base-fee-billing/v1",
+      "multiplierBps": 11000,
+      "minimumAdditionWei": "0"
+    },
+    "executionGasBufferBps": 2000
+  }
+}

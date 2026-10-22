@@ -18,7 +18,34 @@ A relay receives a proof that a user generated in their own wallet, checks it ag
 
 There are no keys, wallets, RPC credentials or private state in this repository. Proving keys and contract artifacts are public release inputs that you stage from `Lincoln-protocol-core`; they are mounted read-only and never built into the image.
 
-## Run a relay
+## Install with one command
+
+On a Linux server (4 GB of RAM or more, ports 80 and 443 open) with a DNS name pointing at it:
+
+```sh
+echo 'https://your-rpc-provider.example/v2/KEY' > rpc-url    # your own Robinhood Chain RPC
+curl -fsSL https://raw.githubusercontent.com/lincoln-protocol/lincoln-relay/main/install.sh \
+  | sudo bash -s -- --pool lincoln --domain relay.example.com --owner 0xYourOwnerWallet --rpc-url-file ./rpc-url
+```
+
+The installer:
+- installs Docker if it is missing (it asks first);
+- builds the relay image from this repository;
+- stages the public release from `Lincoln-protocol-core` (`v0.1.0-rc.3`);
+- creates the relay key on the server and prints its address;
+- writes the config;
+- starts the relay read-only behind Caddy, which obtains the TLS certificate for `https://<domain>`.
+
+The first start verifies the release and syncs chain history, which takes 10 to 30 minutes. A private RPC is required because the public one rate-limits that sync.
+
+Then:
+1. Back up `/opt/lincoln-relay/secrets`. It holds the only copy of the relay key.
+2. Send ETH for gas to the relay address, then run `lincoln-relay signing on`.
+3. Register at https://app.lincolnprotocol.com/relay from your owner wallet with the relay address, the endpoint, and the consent the installer printed (`lincoln-relay consent <owner>` signs a new one).
+
+`lincoln-relay status | health | logs | address | signing on|off | up | down` manages it afterwards. Rerunning the installer updates the code and keeps the key, state and RPC file.
+
+## Run a relay by hand
 
 Requirements: Docker, Node 24, an EOA for the relay with ETH for gas, and a keystore for it made with `cast wallet import`.
 
@@ -33,6 +60,7 @@ docker build -f docker/mainnet/runtime.Dockerfile -t lincoln-relay:reviewed .
 git clone https://github.com/lincoln-protocol/Lincoln-protocol-core
 (cd Lincoln-protocol-core/releases/rc3 && npm ci --ignore-scripts)
 node docker/mainnet/stage-public-release.mjs /abs/mainnet-public-release   # run with releases/rc3 as the working directory's repo root; see below
+# rc3 leaves config/phase2-mainnet.json deployer.address null; set it to the pool deployer 0x36437b878415EdA1a24186CF79AFffBc9ecEd298
 
 # 3. Config: profile with your relay address, plus runtime.json
 mkdir /abs/mainnet-config
