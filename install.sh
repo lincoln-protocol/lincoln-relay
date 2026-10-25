@@ -225,7 +225,7 @@ EOF
 chown -R root:root "$CONFIG.new"; chmod 0644 "$CONFIG.new"/*.json
 docker run --rm -v "$CONFIG.new:/run/config/mainnet:ro" "$IMAGE" node --input-type=module -e \
   "const m=await import('/app/docker/mainnet/start.mjs'),fs=await import('node:fs'),read=f=>JSON.parse(fs.readFileSync('/run/config/mainnet/'+f,'utf8')),c=read('runtime.json');
-   m.planMainnetRuntime(c,{role:'$ROLE',poolId:'$POOL',signingFlag:'1'});m.validateMainnetProfiles(read(c.profileFile),c);" \
+   for(const id of c.poolIds)m.planMainnetRuntime(c,{role:'api',poolId:id,signingFlag:'1'});m.validateMainnetProfiles(read(c.profileFile),c);" \
   || die "runtime.json failed the relay's own checks"
 rm -rf "$CONFIG.old"; [ -d "$CONFIG" ] && mv "$CONFIG" "$CONFIG.old"; mv "$CONFIG.new" "$CONFIG"
 
