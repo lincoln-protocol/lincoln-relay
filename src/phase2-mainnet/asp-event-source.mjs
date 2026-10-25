@@ -15,37 +15,44 @@ const same=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toLowerCase()===b.
 export const ASP_COMMITMENT_TOPIC=keccak256(toBytes('NewCommitment(uint256,uint256,bytes)'));
 export const ASP_PUBLICATION_EVENT_FILE='publication-event.json';
 
+/** The socket heartbeat is one eth_blockNumber per ASP_EVENT_HEARTBEAT_MS on the
+ * open connection; the answer must arrive and the height must advance within
+ * ASP_EVENT_STALE_MS or the connection is replaced. Providers bill every frame
+ * on a socket like a request, so a newHeads subscription (one frame per block,
+ * ten blocks a second here) is deliberately not used: the commitment log
+ * subscription is the only stream, and it is silent until a deposit lands.
+ */
+export const ASP_EVENT_HEARTBEAT_MS=15000,ASP_EVENT_STALE_MS=45000;
+
 /** Construct ONLY with the already validated runtime HTTP secret. This object
  * deliberately exposes neither endpoint, socket, error objects nor transports.
  * start() opens one connection; import/construction opens no network resource.
  */
-export function createASPEventSource({rpcURL,profiles,WebSocketImpl=globalThis.WebSocket}={}){
+export function createASPEventSource({rpcURL,profiles,WebSocketImpl=globalThis.WebSocket,heartbeatMs=ASP_EVENT_HEARTBEAT_MS,staleMs=ASP_EVENT_STALE_MS}={}){
   need(Array.isArray(profiles)&&profiles.length>0&&profiles.length<=32,'ASP_EVENT_ROSTER_REQUIRED');
   const pools=profiles.map(p=>p.pool?.address?.toLowerCase()),chainId=profiles[0].chain?.id,genesis=profiles[0].genesisHash;
   need(pools.every(address)&&new Set(pools).size===pools.length&&Number.isSafeInteger(chainId)&&chainId>0&&hash(genesis)
     &&profiles.every(p=>p.chain?.id===chainId&&p.genesisHash===genesis),'ASP_EVENT_ROSTER_INVALID');
+  need(Number.isSafeInteger(heartbeatMs)&&heartbeatMs>=50&&heartbeatMs<=60000&&Number.isSafeInteger(staleMs)&&staleMs>=2*heartbeatMs&&staleMs<=600000,'ASP_EVENT_OPTIONS_INVALID');
   let endpoint;try{endpoint=new URL(rpcURL);}catch{throw new Error('ASP_EVENT_RPC_INVALID');}
   need(endpoint.protocol==='https:'&&!endpoint.username&&!endpoint.password&&!endpoint.hash,'ASP_EVENT_RPC_INVALID');
   endpoint.protocol='wss:';
   need(typeof WebSocketImpl==='function','ASP_EVENT_WEBSOCKET_UNAVAILABLE');
-  const approvedPools=new Set(pools);let socket=null,retry=null,deadline=null,watchdog=null,wake=null,stopped=true,generation=0,attempt=0,confirmationWakeUntil=0;
+  const approvedPools=new Set(pools);let socket=null,retry=null,deadline=null,watchdog=null,pulse=null,wake=null,stopped=true,generation=0,attempt=0;
   let observation='stopped';
-  function clearTimers(){clearTimeout(retry);clearTimeout(deadline);clearInterval(watchdog);retry=null;deadline=null;watchdog=null;}
+  function clearTimers(){clearTimeout(retry);clearTimeout(deadline);clearInterval(watchdog);clearInterval(pulse);retry=null;deadline=null;watchdog=null;pulse=null;}
   function notify(reason){if(stopped)return;try{wake?.(reason);}catch{/* canonical polling remains independent of this hint */}}
-  function catchup(reason){confirmationWakeUntil=Date.now()+5000;notify(reason);}
   function connect(){
     if(stopped)return;retry=null;const tag=++generation;observation='connecting';let ws;
     try{ws=new WebSocketImpl(endpoint.href);}catch{return reconnect(tag);}
-    socket=ws;let lastMessage=Date.now(),lastHeadProgress=Date.now(),lastHeadNumber=null,lastHeadHash=null;
-    const subscriptions=new Map();let chainOK=false,genesisOK=!hash(genesis),subscribed=false,logsSubscription=null,headsSubscription=null,ready=false;
+    socket=ws;let lastMessage=Date.now(),lastProgress=Date.now(),lastHeight=null,pulsePending=false;
+    let chainOK=false,genesisOK=!hash(genesis),subscribed=false,logsSubscription=null,ready=false;
     function send(id,method,params){if(stopped||tag!==generation)return false;try{ws.send(JSON.stringify({jsonrpc:'2.0',id,method,params}));return true;}catch{reconnect(tag);return false;}}
-    function subscribe(){if(!chainOK||!genesisOK||subscribed)return;subscribed=true;
-      if(send(3,'eth_subscribe',['logs',{address:pools,topics:[ASP_COMMITMENT_TOPIC]}]))send(4,'eth_subscribe',['newHeads']);
-    }
+    function subscribe(){if(!chainOK||!genesisOK||subscribed)return;subscribed=true;send(3,'eth_subscribe',['logs',{address:pools,topics:[ASP_COMMITMENT_TOPIC]}]);}
     deadline=setTimeout(()=>reconnect(tag),10000);deadline.unref?.();
-    // newHeads is the application heartbeat on this fast-block chain. Replayed
-    // heads, unrelated frames or JSON-RPC chatter cannot keep a dead subscription alive.
-    watchdog=setInterval(()=>{const now=Date.now();if(now-lastMessage>45000||ready&&now-lastHeadProgress>45000)reconnect(tag);},10000);watchdog.unref?.();
+    // Replayed frames, unrelated frames or JSON-RPC chatter cannot keep a dead
+    // connection alive: only an answered heartbeat with a higher height counts.
+    watchdog=setInterval(()=>{const now=Date.now();if(now-lastMessage>staleMs||ready&&now-lastProgress>staleMs)reconnect(tag);},Math.max(50,Math.floor(staleMs/4)));watchdog.unref?.();
     ws.addEventListener('open',()=>{if(stopped||tag!==generation)return;
       send(1,'eth_chainId',[]);if(hash(genesis))send(2,'eth_getBlockByNumber',['0x0',false]);
     });
@@ -59,53 +66,42 @@ export function createASPEventSource({rpcURL,profiles,WebSocketImpl=globalThis.W
         if(message.error)return reconnect(tag);
         if(message.id===1){if(message.result!==`0x${chainId.toString(16)}`)return reconnect(tag);chainOK=true;subscribe();}
         else if(message.id===2){if(!same(message.result?.hash,genesis))return reconnect(tag);genesisOK=true;subscribe();}
-        else if(message.id===3||message.id===4){if(!subscribed||typeof message.result!=='string'||message.result.length===0||message.result.length>256)return reconnect(tag);
-          const previous=message.id===3?logsSubscription:headsSubscription;
-          if(previous!==null&&previous!==message.result)return reconnect(tag);
-          if(message.id===3)logsSubscription=message.result;else headsSubscription=message.result;
-          if(logsSubscription!==null&&logsSubscription===headsSubscription)return reconnect(tag);
-          subscriptions.set(message.result,message.id===3?'logs':'heads');
-          if(!ready&&logsSubscription!==null&&headsSubscription!==null){ready=true;clearTimeout(deadline);deadline=null;attempt=0;observation='subscribed';lastHeadProgress=Date.now();
+        else if(message.id===3){if(!subscribed||typeof message.result!=='string'||message.result.length===0||message.result.length>256)return reconnect(tag);
+          if(logsSubscription!==null&&logsSubscription!==message.result)return reconnect(tag);
+          logsSubscription=message.result;
+          if(!ready){ready=true;clearTimeout(deadline);deadline=null;attempt=0;observation='subscribed';lastProgress=Date.now();
+            pulse=setInterval(()=>{if(pulsePending)return;pulsePending=true;send(5,'eth_blockNumber',[]);},heartbeatMs);pulse.unref?.();
             // Includes the initial connection and every reconnection. A silent
             // gap may contain deposits even when no later matching log arrives.
-            catchup('connection-ready');}
+            notify('connection-ready');}
+        }
+        else if(message.id===5){
+          // An unsolicited or malformed heartbeat answer is a protocol violation.
+          if(!ready||!pulsePending||!rpcQuantity(message.result))return reconnect(tag);
+          pulsePending=false;const height=BigInt(message.result);
+          if(lastHeight===null||height>lastHeight){lastHeight=height;lastProgress=Date.now();}
         }
         return;
       }
-      if(message.method!=='eth_subscription')return;
-      const kind=subscriptions.get(message.params?.subscription),data=message.params?.result;
-      if(kind==='logs'&&address(data?.address)&&approvedPools.has(data.address.toLowerCase())&&same(data?.topics?.[0],ASP_COMMITMENT_TOPIC)
-        &&Array.isArray(data.topics)&&data.topics.length===3&&hash(data.blockHash)){
-        // A removed log still wakes canonical reconciliation, never approval.
-        catchup('commitment');
-      }else if(kind==='heads'){
-        if(!hash(data?.hash)||!hash(data?.parentHash)||!rpcQuantity(data?.number))return reconnect(tag);
-        const number=BigInt(data.number);
-        if(lastHeadHash!==null&&same(lastHeadHash,data.hash)&&number!==lastHeadNumber)return reconnect(tag);
-        const changed=lastHeadHash===null||!same(lastHeadHash,data.hash)||number!==lastHeadNumber;
-        if(!changed)return;
-        const reorganized=lastHeadNumber!==null&&number<=lastHeadNumber;
-        const disconnected=lastHeadNumber!==null&&number===lastHeadNumber+1n&&!same(data.parentHash,lastHeadHash);
-        const skipped=lastHeadNumber!==null&&number>lastHeadNumber+1n;
-        lastHeadProgress=Date.now();lastHeadNumber=number;lastHeadHash=data.hash;
-        if(reorganized)catchup('head-reorganization');
-        else if(disconnected||skipped)catchup('head-discontinuity');
-        else if(Date.now()<=confirmationWakeUntil)notify('confirmation-head');
-      }
+      if(message.method!=='eth_subscription'||logsSubscription===null||message.params?.subscription!==logsSubscription)return;
+      const data=message.params?.result;
+      // A removed log still wakes canonical reconciliation, never approval.
+      if(address(data?.address)&&approvedPools.has(data.address.toLowerCase())&&same(data?.topics?.[0],ASP_COMMITMENT_TOPIC)
+        &&Array.isArray(data.topics)&&data.topics.length===3&&hash(data.blockHash))notify('commitment');
     });
     ws.addEventListener('close',()=>reconnect(tag));ws.addEventListener('error',()=>reconnect(tag));
   }
   function reconnect(tag){
-    if(stopped||tag!==generation)return;generation++;clearTimeout(deadline);clearInterval(watchdog);deadline=null;watchdog=null;
+    if(stopped||tag!==generation)return;generation++;clearTimeout(deadline);clearInterval(watchdog);clearInterval(pulse);deadline=null;watchdog=null;pulse=null;
     const previous=socket;socket=null;try{previous?.close();}catch{}
     observation='retrying';const ms=Math.min(30000,1000*2**Math.min(attempt++,5));
     // HTTP reconciliation can proceed during a WSS outage as well as after it.
-    catchup('connection-interrupted');
+    notify('connection-interrupted');
     retry=setTimeout(connect,ms);retry.unref?.();
   }
   return {
     start(onWake){need(stopped&&typeof onWake==='function','ASP_EVENT_SOURCE_ALREADY_STARTED');stopped=false;wake=onWake;attempt=0;connect();},
-    close(){stopped=true;generation++;clearTimers();wake=null;confirmationWakeUntil=0;const previous=socket;socket=null;try{previous?.close();}catch{}observation='stopped';},
+    close(){stopped=true;generation++;clearTimers();wake=null;const previous=socket;socket=null;try{previous?.close();}catch{}observation='stopped';},
     status(){return {status:observation,poolCount:pools.length};}
   };
 }
@@ -117,6 +113,11 @@ async function readPublicJSON(filename,max){
   }finally{await handle.close();}
 }
 
+// An unchanged published signal is re-verified against the canonical state at
+// this cadence (a revocation or a closed accepted-policy window changes no
+// public file). Each verification is a pool sync, or a snapshot inside the
+// service's fresh window, so this bounds RPC spend per subscribed pool.
+export const ASP_EVENT_CANONICAL_REVERIFY_MS=15000;
 /** One watcher/poll/snapshot per service, shared by bounded SSE subscribers.
  * Signal files are only hints too: current.json and one canonical indexer sync
  * must agree before an event is emitted. No chain scan is done per subscriber.
@@ -167,7 +168,7 @@ export function createASPPublicationEvents({profile,associationSetFile,sync,maxC
         // without either public file changing. Bound the shared canonical cache;
         // a new subscriber never bypasses this validation through the fast path.
         const age=canonicalVerifiedAt===null?Infinity:Number(now())-canonicalVerifiedAt;
-        if(!unchanged||!Number.isFinite(age)||age<0||age>=2000){
+        if(!unchanged||!Number.isFinite(age)||age<0||age>=ASP_EVENT_CANONICAL_REVERIFY_MS){
           const snapshot=await sync();
           need(snapshot.chainId===chainId&&same(snapshot.pool,pool)&&String(snapshot.scope)===scope
             &&snapshot.asp?.epoch===signal.epoch&&snapshot.asp.root===signal.root&&snapshot.asp.validUntil===signal.validUntil

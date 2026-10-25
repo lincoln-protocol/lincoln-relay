@@ -83,10 +83,12 @@ export function createPhase2PonderClient({client,profile,baseURL,fetchImpl=globa
     let response;diagnostic.requests++;
     try{response=await fetchImpl(url,{method:'GET',headers:{accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(timeoutMs)});}
     catch{throw Object.assign(new Error('PONDER_UNAVAILABLE'),{code:'PONDER_UNAVAILABLE'});}
-    if([404,409,425,429,502,503,504].includes(response.status)){
+    // Any non-success status is an unavailable indexer, never a verification
+    // verdict: a 5xx from a failing indexer or an unexpected 4xx falls back to
+    // RPC exactly like a lagging 409, instead of stopping the publisher or API.
+    if(!response.ok){
       await response.body?.cancel();throw Object.assign(new Error('PONDER_UNAVAILABLE'),{code:'PONDER_UNAVAILABLE'});
     }
-    check(response.ok,'PONDER_HTTP_REJECTED');
     try{return await readJSON(response,maxResponseBytes);}
     catch(error){if(error.code?.startsWith('PONDER_'))throw error;throw Object.assign(new Error('PONDER_UNAVAILABLE'),{code:'PONDER_UNAVAILABLE'});}
   }

@@ -35,7 +35,7 @@ export async function readCombinedTestnetFees(root=ROOT){
 }
 
 export async function createServiceSigner({client,profile,accounts,directory,validateRuntime=async()=>{},root=ROOT,
-  signingEnabled=true,budgetBaseline=null,castBin=process.env.PHASE1_CAST_BIN??'/usr/local/bin/cast',rpcUrl=profile.chain.rpcUrl}){
+  signingEnabled=true,budgetBaseline=null,castBin=process.env.PHASE1_CAST_BIN??(process.platform==='darwin'?'/Users/leo/.foundry/bin/cast':'/usr/local/bin/cast'),rpcUrl=profile.chain.rpcUrl}){
   const chainId=profile.chain.id,testnet=chainId===46630;
   ensure([31340,46630].includes(chainId)&&profile.testOnly===true&&profile.productionReady===false,'TEST_CHAIN_REQUIRED');
   const identity=sha(JSON.stringify({chainId,genesis:profile.genesisHash,accounts:Object.fromEntries(Object.entries(accounts).map(([k,v])=>[k,v.address]))}));

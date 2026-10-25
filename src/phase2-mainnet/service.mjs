@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Production HTTP adapter. The shared signer alone owns raw transactions/nonces.
 import {createHash} from 'node:crypto';
+import {prepareWhenSignerFree,RELAY_SIGNER_WAIT_MS} from './relay-signer-wait.mjs';
 import {monitorEventLoopDelay} from 'node:perf_hooks';
 import {buildStateDelta,STATE_DELTA_MAX_AGE_BLOCKS,STATE_DELTA_PATH,STATE_DELTA_SCHEMA} from './state-delta.mjs';
 import {createBoundedHttpServer,normalizeHttpLimits,serviceJson,serviceJsonVersioned} from '../phase2-asp/http.mjs';
@@ -24,7 +25,16 @@ const need=(ok,code)=>{if(!ok)throw Object.assign(new Error(code),{code});};
 // Public reads answer from the latest verified snapshot: as is when it is at
 // most SNAPSHOT_FRESH_MS old, and while at most SNAPSHOT_STALE_MS old with one
 // background refresh started. Job submission always syncs a fresh snapshot.
-export const SNAPSHOT_FRESH_MS=3000,SNAPSHOT_STALE_MS=30000;
+// Every refresh is a full per-pool RPC sync, so the fresh window bounds the
+// RPC spend of a polled pool: ten seconds keeps reads within ~100 blocks of
+// the head on this 0.1 s-block chain at a third of the refreshes of a 3 s window.
+export const SNAPSHOT_FRESH_MS=10000,SNAPSHOT_STALE_MS=30000;
+/** Readiness and configuration probes answer from the last completed snapshot
+ * while it is at most this old, and never start a sync themselves below that age.
+ * The blue/green supervisor probes every pool's /readyz and /v3/config every
+ * 20 s; with no users at all that must not become a roster-wide chain sync every
+ * 20 s. State and association-set reads keep the fresh/stale windows above. */
+export const PROBE_MAX_AGE_MS=300000;
 // One process-wide event-loop delay monitor (all pools share the loop). The
 // last completed 60 s window is reported by /readyz so CPU stalls are visible.
 const loopDelay=monitorEventLoopDelay({resolution:10});loopDelay.enable();
@@ -50,12 +60,15 @@ export function mainnetRoutesForFeePolicy(routes,policy){
 }
 
 /** No proving witnesses or private keys are accepted over this API. */
-export async function createMainnetASPService({client,profile,artifacts,directory,executor=null,signingEnabled=false,routes=[],associationSetLoader,associationSet,quoteRoute,serviceFeePolicy=null,gasPricingPolicy=null,assetPriceSource=null,maxGas=5000000n,host='127.0.0.1',port=0,networkPolicy=createNetworkPolicy(),listen=true,httpOptions={},errorLogger,publisherStatusLoader,associationSetFile,reconcileIntervalMs=10000,snapshotStaleMs=SNAPSHOT_STALE_MS,pointsReceipts=null}={}){
+export async function createMainnetASPService({client,profile,artifacts,directory,executor=null,signingEnabled=false,routes=[],associationSetLoader,associationSet,quoteRoute,serviceFeePolicy=null,gasPricingPolicy=null,assetPriceSource=null,maxGas=5000000n,host='127.0.0.1',port=0,networkPolicy=createNetworkPolicy(),listen=true,httpOptions={},errorLogger,publisherStatusLoader,associationSetFile,reconcileIntervalMs=10000,snapshotFreshMs=SNAPSHOT_FRESH_MS,snapshotStaleMs=SNAPSHOT_STALE_MS,probeMaxAgeMs=PROBE_MAX_AGE_MS,pointsReceipts=null,
+  signerBusyWaitMs=RELAY_SIGNER_WAIT_MS,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}){
   const httpLimits=normalizeHttpLimits(httpOptions);
   need(errorLogger===undefined||typeof errorLogger==='function','INVALID_ERROR_LOGGER');need(publisherStatusLoader===undefined||typeof publisherStatusLoader==='function','INVALID_PUBLISHER_STATUS_LOADER');
   need(assetPriceSource===null||['snapshot','status','close'].every(key=>typeof assetPriceSource[key]==='function'),'INVALID_ASSET_PRICE_SOURCE');
   need(Number.isSafeInteger(reconcileIntervalMs)&&reconcileIntervalMs>=10&&reconcileIntervalMs<=60000,'MAINNET_SERVICE_OPTIONS_INVALID');
-  need(Number.isSafeInteger(snapshotStaleMs)&&snapshotStaleMs>=SNAPSHOT_FRESH_MS&&snapshotStaleMs<=60000,'MAINNET_SERVICE_OPTIONS_INVALID');
+  need(Number.isSafeInteger(snapshotFreshMs)&&snapshotFreshMs>=1000&&snapshotFreshMs<=30000
+    &&Number.isSafeInteger(snapshotStaleMs)&&snapshotStaleMs>=snapshotFreshMs&&snapshotStaleMs<=60000
+    &&Number.isSafeInteger(probeMaxAgeMs)&&probeMaxAgeMs>=snapshotStaleMs&&probeMaxAgeMs<=3600000,'MAINNET_SERVICE_OPTIONS_INVALID');
   profile=structuredClone(profile);routes=structuredClone(routes);artifacts=structuredClone(artifacts);
   const feePolicy=serviceFeePolicy===null?null:normalizeServiceFeePolicy(serviceFeePolicy);
   normalizeProfile(profile);need(profile.schema===PRODUCTION_PROFILE_SCHEMA,'MAINNET_PRODUCTION_PROFILE_REQUIRED');
@@ -64,7 +77,9 @@ export async function createMainnetASPService({client,profile,artifacts,director
   const configuredRoutes=normalizeServiceRoutes(profile,routes),availableRoutes=mainnetRoutesForFeePolicy(configuredRoutes,feePolicy),identity=phase2Identity(profile),processor=profile.relayer?.toLowerCase()??null;
   const routeAdapters=new Set(configuredRoutes.map(entry=>entry.route.adapter.toLowerCase()));
   const indexer=await createPhase2Indexer({client,profile,artifacts,directory:`${directory}/indexer`,associationSetLoader,associationSet});
-  const publicationEvents=createASPPublicationEvents({profile,associationSetFile,sync:()=>indexer.sync()});
+  // Publication events re-verify the canonical state against the published
+  // signal from a snapshot inside the fresh window, not a new sync every time.
+  const publicationEvents=createASPPublicationEvents({profile,associationSetFile,sync:()=>indexer.sync({maxAgeMs:snapshotFreshMs})});
   let store;try{store=await openServiceStore({directory:`${directory}/relay`,identity,filename:'jobs.json'});}catch(error){await indexer.close();throw error;}
   let state,tail=Promise.resolve(),queued=0,closed=false;
   // Relay fees go straight to the governance Safe; the relay's own address stays
@@ -238,7 +253,11 @@ export async function createMainnetASPService({client,profile,artifacts,director
       }
       let reservation;
       try{
-        reservation=await relayStage('signing',()=>executor.prepare({id:job.sharedId,to:intent.to,data:intent.data,value:'0',gas:String(gas),...(gasPrice?{gasPrice:String(gasPrice)}:{})}));
+        // The signing address carries one transaction at a time. Submissions run in
+        // order, so the one at the head waits (bounded) for the previous receipt
+        // instead of being cancelled; the previous job settles through reconcile.
+        reservation=await relayStage('signing',()=>prepareWhenSignerFree({waitMs:signerBusyWaitMs,sleep,settle:()=>reconcile(),
+          prepare:()=>executor.prepare({id:job.sharedId,to:intent.to,data:intent.data,value:'0',gas:String(gas),...(gasPrice?{gasPrice:String(gasPrice)}:{})})}));
         if(feeQuote)checkFeeCost(currentGasQuote,{checkedGas:reservation.gas,checkedPrice:reservation.gasPrice});
         if(swapEconomics&&intent.kind==='swap'&&gasPrice)await swapEconomics.submission({intent,gas:reservation.gas,gasPriceWei:reservation.gasPrice});
       }
@@ -298,20 +317,24 @@ export async function createMainnetASPService({client,profile,artifacts,director
     return serviceJsonVersioned(req,res,snapshotBodies.get(name));
   }
   /** Latest snapshot for public reads; never makes a request wait on a sync it can avoid. */
-  async function readSnapshot(){
+  async function readSnapshot({probe=false}={}){
     const latest=indexer.latest();
     if(latest){
       const age=Date.now()-latest.completedAt;
-      if(age<=SNAPSHOT_FRESH_MS)return latest.snapshot;
+      if(age<=snapshotFreshMs)return latest.snapshot;
+      // A probe (readiness, configuration) reports the last completed snapshot and
+      // starts no sync of its own while that snapshot is younger than probeMaxAgeMs.
+      if(probe&&age<=probeMaxAgeMs)return latest.snapshot;
       if(age<=snapshotStaleMs){void indexer.sync().catch(()=>{});return latest.snapshot;}
     }
     return indexer.sync();
   }
+  const snapshotAgeMs=()=>{const latest=indexer.latest();return latest?Date.now()-latest.completedAt:null;};
   // Canonical hash of a client's base block, shared by concurrent clients for a few seconds.
   const baseHashes=new Map();
   async function canonicalHash(number,snapshot){
     if(String(number)===snapshot.blockNumber)return snapshot.blockHash;
-    const memo=baseHashes.get(number);if(memo&&Date.now()-memo.at<=SNAPSHOT_FRESH_MS)return memo.hash;
+    const memo=baseHashes.get(number);if(memo&&Date.now()-memo.at<=snapshotFreshMs)return memo.hash;
     const block=await client.getBlock({blockNumber:BigInt(number)});need(block&&/^0x[0-9a-f]{64}$/i.test(block.hash),'RPC_BLOCK_INVALID');
     baseHashes.set(number,{hash:block.hash,at:Date.now()});while(baseHashes.size>256)baseHashes.delete(baseHashes.keys().next().value);
     return block.hash;
@@ -337,20 +360,22 @@ export async function createMainnetASPService({client,profile,artifacts,director
     if(req.method==='GET'&&url.pathname==='/livez')return json(res,200,{ok:true});
     if(req.method==='GET'&&['/healthz','/readyz','/v3/readyz'].includes(url.pathname)){
       // Readiness, configuration, state and association-set reads may reuse a
-      // snapshot completed within the last three seconds; spend validation
+      // snapshot completed within the fresh window; spend validation
       // (job submission) always takes a fresh canonical snapshot.
-      const s=await readSnapshot(),feeStatus=feeQuotes?.publicConfig(),feeCapacity=feeQuotes?.capacity(),priceStatus=assetPriceSource?.status();
+      const s=await readSnapshot({probe:true}),feeStatus=feeQuotes?.publicConfig(),feeCapacity=feeQuotes?.capacity(),priceStatus=assetPriceSource?.status();
       const quotesReady=feeStatus?.available!==false&&feeCapacity?.canIssue!==false;
-      return json(res,200,{ok:true,chainId:4663,blockNumber:s.blockNumber,relaySigning:signingEnabled,jobCapacity:jobCapacity(),
-        normalSpendingReady:!s.asp.expired&&s.asp.spendable!==false&&Array.isArray(s.asp.leaves)&&quotesReady,publicExitsReady:true,
+      // The snapshot may be a few minutes old here: expiry is judged against the clock, not the sync time.
+      const expired=s.asp.expired||BigInt(s.asp.validUntil??0)<=BigInt(Math.floor(Date.now()/1000));
+      return json(res,200,{ok:true,chainId:4663,blockNumber:s.blockNumber,snapshotAgeMs:snapshotAgeMs(),relaySigning:signingEnabled,jobCapacity:jobCapacity(),
+        normalSpendingReady:!expired&&s.asp.spendable!==false&&Array.isArray(s.asp.leaves)&&quotesReady,publicExitsReady:true,
         ...(feeStatus?{feeQuotesReady:quotesReady,feeQuoteUnavailableReason:feeStatus.unavailableReason??feeCapacity.reason,
           feeQuoteCapacity:feeCapacity}:{}),
         ...(priceStatus?{swapPricingReady:priceStatus.available===true,priceFeed:priceStatus}:{}),
-        asp:{root:s.asp.root,epoch:s.asp.epoch,validUntil:s.asp.validUntil,expired:s.asp.expired,setAvailable:Array.isArray(s.asp.leaves)},
+        asp:{root:s.asp.root,epoch:s.asp.epoch,validUntil:s.asp.validUntil,expired,setAvailable:Array.isArray(s.asp.leaves)},
         eventLoopDelayMs:loopWindow??loopSample(),
         ...await refreshPublisher(s),...profileReleaseFlags(profile)});
     }
-    if(req.method==='GET'&&url.pathname==='/v3/config'){await refreshPublisher(await readSnapshot());return json(res,200,config());}
+    if(req.method==='GET'&&url.pathname==='/v3/config'){await refreshPublisher(await readSnapshot({probe:true}));return json(res,200,config());}
     if(req.method==='GET'&&url.pathname==='/v3/state'){const snapshot=await readSnapshot(),{checkpoint,nullifierBlocks,...s}=snapshot,publisher=await refreshPublisher(s);noteSet(s.asp);return snapshotJson(req,res,'state',snapshot,publisher,()=>({...s,...publisher}));}
     if(req.method==='GET'&&STATE_DELTA_PATH.test(url.pathname)){const snapshot=await readSnapshot(),publisher=await refreshPublisher(snapshot);
       try{return json(res,200,await stateDelta(BigInt(STATE_DELTA_PATH.exec(url.pathname)[1]),snapshot,publisher));}

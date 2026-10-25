@@ -28,6 +28,20 @@ const MAX_ATTEMPTS=32;
 const valueAllowed=(e,address)=>e.kind===undefined?e.value==='0'&&!String(e.id).startsWith('treasury:'):(assertTreasuryEntry(e,{address}),true);
 const statuses=new Set(['prepared','signed','broadcasting','submitted','unknown','rejected','conflicted','confirmed','reverted','cancelled']);
 const retryableReason=reason=>['FEE_BELOW_BASE','INSUFFICIENT_FUNDS'].includes(reason);
+// What the transport said, reduced to fixed-shape facts for the ledger and the
+// log: error names, string codes, numeric codes and HTTP statuses, down the
+// cause chain. Never messages, bodies or URLs.
+const errorClass=error=>{
+  const out=[];const seen=new Set();
+  for(let current=error,depth=0;current&&typeof current==='object'&&!seen.has(current)&&depth<6;current=current.cause,depth++){
+    seen.add(current);const item={};
+    if(typeof current.name==='string'&&/^[A-Za-z]{1,64}$/.test(current.name))item.name=current.name;
+    if(typeof current.code==='string'&&/^[A-Z0-9_]{1,64}$/.test(current.code)||Number.isSafeInteger(current.code))item.code=current.code;
+    if(Number.isSafeInteger(current.status)&&current.status>=100&&current.status<=599)item.status=current.status;
+    if(Object.keys(item).length)out.push(item);
+  }
+  return out;
+};
 const missingReceipt=error=>['TransactionReceiptNotFoundError','TransactionNotFoundError'].includes(error?.name)||['RECEIPT_NOT_FOUND','TRANSACTION_NOT_FOUND'].includes(error?.code);
 const attemptsOf=entry=>entry.attempts??(entry.hash?[{hash:entry.hash,...(entry.rawTransaction?{rawTransaction:entry.rawTransaction}:{}),gasPrice:entry.gasPrice,feeCeilingWei:entry.feeCeilingWei,status:entry.status,
   ...(entry.rejectionReason?{rejectionReason:entry.rejectionReason}:{})}]:[]);
@@ -112,8 +126,11 @@ export function mainnetSignerDirectory({root=ROOT,address}={}){
  * explicit operator recovery, never automatic stale-lock deletion.
  */
 export function createMainnetSigner({client,address,account,keystoreFile,passwordFile,budgetWei,maxFeePerGasWei,reserveWei,
-  root=ROOT,directory,signRawTransaction,beforeBroadcast,expectedGenesisHash,treasuryAuthorizer}={}){
+  root=ROOT,directory,signRawTransaction,beforeBroadcast,expectedGenesisHash,treasuryAuthorizer,
+  unknownBroadcastProbeMs=0,unknownBroadcastProbeIntervalMs=3000,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),now=Date.now}={}){
   need(client&&isAddress(address)&&(treasuryAuthorizer===undefined||typeof treasuryAuthorizer==='function'),'MAINNET_SIGNER_OPTIONS_INVALID');address=getAddress(address);
+  need(Number.isSafeInteger(unknownBroadcastProbeMs)&&unknownBroadcastProbeMs>=0&&unknownBroadcastProbeMs<=300000
+    &&Number.isSafeInteger(unknownBroadcastProbeIntervalMs)&&unknownBroadcastProbeIntervalMs>=1&&unknownBroadcastProbeIntervalMs<=60000,'MAINNET_SIGNER_PROBE_INVALID');
   const budget=integer(budgetWei,'MAINNET_EXPLICIT_BUDGET_REQUIRED'),maxPrice=integer(maxFeePerGasWei,'MAINNET_EXPLICIT_GAS_PRICE_REQUIRED');
   const reserve=integer(reserveWei,'MAINNET_EXPLICIT_RESERVE_REQUIRED',{zero:true});
   directory??=mainnetSignerDirectory({root,address});let sign=signRawTransaction;
@@ -193,6 +210,28 @@ export function createMainnetSigner({client,address,account,keystoreFile,passwor
     const fee=gas*price,previous=replacing?cost(replacing):0n,reserved=fee>previous?fee:previous;
     const spent=state.entries.reduce((sum,e)=>sum+cost(e),0n)-previous;
     need(spent+reserved<=budget,'MAINNET_SIGNER_BUDGET_EXCEEDED');need(await client.getBalance({address,blockTag:'pending'})>=reserved+reserve+value,'MAINNET_SIGNER_BALANCE_LOW');return fee;
+  };
+  // An uncertain delivery (transport failure, unrecognised error) is not a
+  // verdict. Before the entry is left to the operator, the chain is asked for
+  // the signed hash for a bounded time: a receipt settles it, a visible
+  // transaction makes it submitted. Nothing is ever re-sent here, and the
+  // probe never changes the nonce or the signed bytes.
+  const probeUnknown=async(state,store,e,current,delivery)=>{
+    if(unknownBroadcastProbeMs===0)return false;
+    const began=now();let polls=0;
+    while(true){
+      polls++;
+      try{if(await settle(state,store,e)){Object.assign(delivery,{status:'submitted',observedAfterMs:now()-began,probePolls:polls});await store.write(state);return true;}}
+      catch(error){if(error?.code!=='MAINNET_RECEIPT_LOOKUP_FAILED')throw error;}
+      let transaction=null;
+      try{transaction=await client.getTransaction({hash:e.hash});}catch(error){if(!missingReceipt(error)&&!['RPC_TIMEOUT'].includes(error?.code))transaction=null;}
+      if(transaction){
+        transactionMatches(transaction,e,current);
+        e.status='submitted';current.status='submitted';Object.assign(delivery,{status:'submitted',observedAfterMs:now()-began,probePolls:polls});await store.write(state);return true;
+      }
+      if(now()-began>=unknownBroadcastProbeMs)return false;
+      await sleep(Math.min(unknownBroadcastProbeIntervalMs,Math.max(1,unknownBroadcastProbeMs-(now()-began))));
+    }
   };
   return {
     address,chainId:4663,directory,
@@ -332,8 +371,9 @@ export function createMainnetSigner({client,address,account,keystoreFile,passwor
           if(await settle(state,store,e))return e.hash;
           throw Object.assign(new Error('MAINNET_BROADCAST_REJECTED'),{code:'MAINNET_BROADCAST_REJECTED',rejectionReason:classification.rejectionReason,transactionHash:e.hash,retrySameId:e.status==='rejected'});
         }
-        e.status='unknown';current.status='unknown';delivery.status='unknown';await store.write(state);
-        throw Object.assign(new Error('MAINNET_BROADCAST_UNKNOWN'),{code:'MAINNET_BROADCAST_UNKNOWN',transactionHash:e.hash});
+        e.status='unknown';current.status='unknown';delivery.status='unknown';delivery.errorClass=errorClass(error);await store.write(state);
+        if(await probeUnknown(state,store,e,current,delivery))return e.hash;
+        throw Object.assign(new Error('MAINNET_BROADCAST_UNKNOWN'),{code:'MAINNET_BROADCAST_UNKNOWN',transactionHash:e.hash,errorClass:delivery.errorClass,probedMs:unknownBroadcastProbeMs});
       }
     });},
   };

@@ -127,9 +127,10 @@ async function deactivatePublication({ directory, activeFile = 'active-associati
 
 /** No timer, wallet, or network is opened merely by importing this module. */
 export function createASPPublisher({ operator, signer = null, signingEnabled = false, outputDirectory, activeFile, mirrors = [], intervalSeconds = 60,
-  minPublishIntervalSeconds = 900, identity = null, heartbeatEnabled = signingEnabled, now = Date.now, eventSource = null, onResult = async () => {} }) {
+  eventIdleIntervalSeconds = 30, minPublishIntervalSeconds = 900, identity = null, heartbeatEnabled = signingEnabled, now = Date.now, eventSource = null, onResult = async () => {} }) {
   check(operator && ['prepare', 'status', 'sendPrepared', 'recordHash'].every(k => typeof operator[k] === 'function'), 'ASP_OPERATOR_REQUIRED');
   check(typeof signingEnabled === 'boolean' && Number.isSafeInteger(intervalSeconds) && intervalSeconds >= 5 && intervalSeconds <= 86400, 'INVALID_ASP_PUBLISHER_SETTINGS');
+  check(Number.isSafeInteger(eventIdleIntervalSeconds) && eventIdleIntervalSeconds >= 5 && eventIdleIntervalSeconds <= 3600, 'INVALID_ASP_PUBLISHER_SETTINGS');
   check(!signingEnabled || signer && ['prepare', 'broadcast', 'recoverHash', 'reconcile', 'cancelPrepared'].every(k => typeof signer[k] === 'function'), 'EXPLICIT_ASP_SIGNER_REQUIRED');
   check(Array.isArray(mirrors) && mirrors.length <= 4 && mirrors.every(m => typeof m?.directory === 'string'), 'INVALID_ASP_PUBLICATION_MIRRORS');
   check(Number.isSafeInteger(minPublishIntervalSeconds)&&minPublishIntervalSeconds>0&&minPublishIntervalSeconds<=30*86400&&typeof heartbeatEnabled==='boolean'&&typeof now==='function','INVALID_ASP_PUBLISHER_SETTINGS');
@@ -327,7 +328,7 @@ export function createASPPublisher({ operator, signer = null, signingEnabled = f
       try{
       eventSource?.start(wake);
       while (!signal?.aborted && iterations < maxIterations) {
-        // A burst of logs/heads becomes one follow-up, never concurrent or an
+        // A burst of logs or connection events becomes one follow-up, never concurrent or an
         // unbounded queue of prepare/sign/reconcile calls. Minimum publication
         // cadence remains enforced by the canonical operator, not these hints.
         if(lastStarted)await waitFor(Math.max(0,lastStarted+1000-now()),false);
@@ -345,9 +346,14 @@ export function createASPPublisher({ operator, signer = null, signingEnabled = f
         }
         iterations++;
         if (iterations < maxIterations && !signal?.aborted) {
-          // Event mode retains a bounded five-second canonical fallback even
-          // if a legacy configuration used a much slower polling interval.
-          let waitMs=Math.min(intervalSeconds*1000,eventSource?5000:Infinity);
+          // With a live commitment-log subscription deposits and connection
+          // transitions wake this loop, so the canonical poll only bounds the
+          // age of an idle snapshot: every tick is a full roster sync. While
+          // the subscription is connecting or retrying, event mode
+          // keeps its bounded five-second canonical fallback even if a legacy
+          // configuration used a much slower polling interval.
+          const subscribed=eventSource?.status?.()?.status==='subscribed';
+          let waitMs=eventSource?(subscribed?eventIdleIntervalSeconds*1000:Math.min(intervalSeconds*1000,5000)):intervalSeconds*1000;
           if(last?.summary?.decision==='awaiting-confirmations'||last?.result?.jobs?.some(j=>['prepared','submitted'].includes(j.state)))waitMs=Math.min(waitMs,1000);
           if(last?.result?.decision==='deferred'&&last.result.lastPublicationTimestamp!==null&&last.result.lastPublicationTimestamp!==undefined){
             const remaining=Number(BigInt(last.result.lastPublicationTimestamp)+BigInt(minPublishIntervalSeconds)-BigInt(last.result.chainTimestamp));

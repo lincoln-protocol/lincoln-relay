@@ -18,6 +18,8 @@ import {createMainnetAPIExecutorGroup,finishMainnetAPIExecutorGroup} from '../..
 import {normalizeProfile,PRODUCTION_PROFILE_SCHEMA} from '../../src/phase2-asp/sdk.mjs';
 import {createNetworkPolicy} from '../../src/phase1-service/network.mjs';
 import {createPhase2PonderClient} from '../../src/phase2-asp/ponder-client.mjs';
+import {withImmutableReadCache} from '../../src/phase2-asp/immutable-reads.mjs';
+import {withCoalescedReads} from '../../src/phase2-asp/coalesced-reads.mjs';
 import {readMainnetConfigurationDigest,readMainnetActivationRequest,waitForMainnetActivation,assertMainnetRoleQuiescent,acquireMainnetWriterLease} from '../../src/phase2-mainnet/activation.mjs';
 
 export const MAINNET_CONTAINER_ROOT='/app';
@@ -46,8 +48,10 @@ export function mainnetContainerRPCEnvironment(env={}){
   need(env.PHASE2_MAINNET_RPC_URL===undefined,'MAINNET_RPC_URL_ENV_FORBIDDEN');
   need(env.PHASE2_MAINNET_RPC_FILE===undefined||env.PHASE2_MAINNET_RPC_FILE===MAINNET_RPC_FILE,'MAINNET_CONTAINER_RPC_MOUNT_REQUIRED');
   need(env.PHASE2_MAINNET_RPC_WEBSOCKET===undefined||['0','1'].includes(env.PHASE2_MAINNET_RPC_WEBSOCKET),'MAINNET_RPC_WEBSOCKET_INVALID');
+  need(env.PHASE2_MAINNET_RPC_BATCH===undefined||['0','1'].includes(env.PHASE2_MAINNET_RPC_BATCH),'MAINNET_RPC_BATCH_INVALID');
   return {...(env.PHASE2_MAINNET_RPC_FILE===undefined?{}:{PHASE2_MAINNET_RPC_FILE:MAINNET_RPC_FILE}),
-    ...(env.PHASE2_MAINNET_RPC_WEBSOCKET===undefined?{}:{PHASE2_MAINNET_RPC_WEBSOCKET:env.PHASE2_MAINNET_RPC_WEBSOCKET})};
+    ...(env.PHASE2_MAINNET_RPC_WEBSOCKET===undefined?{}:{PHASE2_MAINNET_RPC_WEBSOCKET:env.PHASE2_MAINNET_RPC_WEBSOCKET}),
+    ...(env.PHASE2_MAINNET_RPC_BATCH===undefined?{}:{PHASE2_MAINNET_RPC_BATCH:env.PHASE2_MAINNET_RPC_BATCH})};
 }
 export function mainnetContainerMirrorEnvironment(env={}){
   const result={};
@@ -63,6 +67,15 @@ export function mainnetContainerPointsEnvironment(env={}){
   need(/^[a-z0-9][a-z0-9_-]{0,63}$/.test(env.PHASE2_MAINNET_POINTS_SEASON),'MAINNET_POINTS_SEASON_INVALID');
   need(env.PHASE2_MAINNET_POINTS_URL===undefined||/^https:\/\/[^\s/?#]+$/.test(env.PHASE2_MAINNET_POINTS_URL),'MAINNET_POINTS_URL_INVALID');
   return {PHASE2_MAINNET_POINTS_SEASON:env.PHASE2_MAINNET_POINTS_SEASON,...(env.PHASE2_MAINNET_POINTS_URL===undefined?{}:{PHASE2_MAINNET_POINTS_URL:env.PHASE2_MAINNET_POINTS_URL})};
+}
+// The ASP's idle cadence while its commitment-log subscription is live: every
+// tick is a full roster sync, so a longer idle interval is the RPC lever.
+// Deposits and connection transitions still wake the loop at once.
+export function mainnetContainerASPEventIdleEnvironment(env={}){
+  const value=env.PHASE2_ASP_EVENT_IDLE_SECONDS;
+  if(value===undefined)return {};
+  need(typeof value==='string'&&/^[1-9][0-9]{0,3}$/.test(value)&&Number(value)>=5&&Number(value)<=3600,'MAINNET_ASP_EVENT_IDLE_INVALID');
+  return {eventIdleIntervalSeconds:Number(value)};
 }
 export function mainnetContainerIndexerEnvironment(env={}){
   need(env.PHASE2_ASP_PONDER_URL===undefined||env.PHASE2_ASP_PONDER_URL==='http://indexer:44663/','MAINNET_CONTAINER_INDEXER_URL_INVALID');
@@ -170,11 +183,17 @@ export async function assertMainnetPublicationExpectation({client,profile,regist
   need(BigInt(policy.validUntil)>block.timestamp&&BigInt(policy.validUntil)<=block.timestamp+30n*86400n,'MAINNET_CONTAINER_ASP_PUBLICATION_EXPIRED');
 }
 
+// After an uncertain delivery the signer asks the chain for its own hash for
+// this long before the publisher stops. Shorter than the publisher's poll
+// budget; long enough for a transaction a load balancer accepted to show up.
+export const MAINNET_UNKNOWN_BROADCAST_PROBE_MS=45000;
+
 export function mainnetPublisherSigner({client,profile,artifacts,plan,signerFactory=createMainnetSigner}){
   need(plan.signingEnabled&&sameAddress(plan.address,profile.registry.provider),'MAINNET_CONTAINER_PROVIDER_PROFILE_MISMATCH');
   const policies=new Map(),abi=artifacts.Phase2ASPRegistry.abi;
   const base=signerFactory({client,root:MAINNET_CONTAINER_ROOT,address:plan.address,keystoreFile:plan.keystoreFile,passwordFile:plan.passwordFile,
     budgetWei:plan.budgetWei,maxFeePerGasWei:plan.maxFeePerGasWei,reserveWei:plan.reserveWei,expectedGenesisHash:profile.genesisHash,
+    unknownBroadcastProbeMs:MAINNET_UNKNOWN_BROADCAST_PROBE_MS,
     beforeBroadcast:async entry=>{
       need(entry.chainId===4663&&sameAddress(entry.to,profile.registry.address)&&quantity(entry.gas)&&BigInt(entry.gas)<=BigInt(plan.maxGas),'MAINNET_CONTAINER_PROVIDER_GAS_OR_TARGET_MISMATCH');
       return assertMainnetPublicationExpectation({client,profile,registryABI:abi,policy:policies.get(entry.id)});
@@ -242,8 +261,11 @@ async function activatePreparedAPIs(prepared,{role,apiPort,startupAuthority}={})
     // shared across pool wrappers; signer stores and pool identities stay local.
     need(prepared.units.length>0,'MAINNET_CONTAINER_API_UNITS_REQUIRED');
     const client=await createMainnetRuntimeClient({env:prepared.units[0].runtimeEnv});
+    // One state-read wrapper for the whole roster: pool syncs that land in the
+    // same window share requests across pools (coalesced-reads.mjs).
+    const stateReads=withCoalescedReads(withImmutableReadCache(client));
     for(const unit of prepared.units){
-      const service=await startMainnetASPRuntime(unit.runtimeEnv,{preparedRuntime:unit.ticket,client,executorGroup});
+      const service=await startMainnetASPRuntime(unit.runtimeEnv,{preparedRuntime:unit.ticket,client,stateReads,executorGroup});
       runtimes.push({plan:unit.plan,service,close:()=>service.close()});
     }
     if(role==='api')return runtimes[0];
@@ -311,9 +333,12 @@ export async function startMainnetContainer({role='api',poolId='eth',env=process
     artifacts??=release.artifacts;
   }
   const rpcClient=await createMainnetRuntimeClient({env:rpcEnv,expectedGenesisHash:profiles[0].genesisHash});
-  // Wrap only known pool/registry log ranges. Receipt, state and signer reads
-  // retain independent RPC validation; temporary indexer lag falls back to RPC.
-  const client=indexerEnv.PHASE2_ASP_PONDER_URL?mainnetOperatorLogClient(rpcClient,profiles,indexerEnv.PHASE2_ASP_PONDER_URL):rpcClient;
+  // Genesis and verified runtime code are reused across the roster's syncs
+  // (immutable-reads.mjs). Wrap only known pool/registry log ranges. Receipt,
+  // state and signer reads retain independent RPC validation; temporary
+  // indexer lag falls back to RPC.
+  const stateReads=withCoalescedReads(withImmutableReadCache(rpcClient));
+  const client=indexerEnv.PHASE2_ASP_PONDER_URL?mainnetOperatorLogClient(stateReads,profiles,indexerEnv.PHASE2_ASP_PONDER_URL):stateReads;
   let operator,signer;
   try{
     operator=await createASPOperator({profiles,requiredPools:profiles.map(p=>p.pool.address),artifacts,client,directory:plan.stateDirectory,policy:config.publisher.publication});
@@ -322,7 +347,7 @@ export async function startMainnetContainer({role='api',poolId='eth',env=process
     // Plans/telemetry/config never serialize the credential-bearing endpoint.
     const eventSource=createASPEventSource({rpcURL:(await resolveMainnetRPC({env:rpcEnv})).url,profiles});
     const publisher=createASPPublisher({operator,signer,eventSource,signingEnabled:plan.signingEnabled,outputDirectory:plan.associationDirectory,activeFile:'current.json',
-      intervalSeconds:config.publisher.intervalSeconds,minPublishIntervalSeconds:config.publisher.publication.minPublishIntervalSeconds,
+      intervalSeconds:config.publisher.intervalSeconds,minPublishIntervalSeconds:config.publisher.publication.minPublishIntervalSeconds,...mainnetContainerASPEventIdleEnvironment(env),
       identity:{chainId:4663,registry:profiles[0].registry.address},heartbeatEnabled:true,onResult});
     return {plan,publisher,async run(){try{return await publisher.run({signal});}finally{await signer?.close?.();await operator.close();await rpcClient.close?.();}},
       async close(){await publisher.stop();await signer?.close?.();await operator.close();await rpcClient.close?.();}};
@@ -341,5 +366,6 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
         ...(runtime.plan.listeners?{listeners:runtime.plan.listeners}:{}),releaseVerified:true,productionReady:false}));
       if(role==='asp')await runtime.run();else if(aborter.signal.aborted)await runtime.close();else aborter.signal.addEventListener('abort',()=>runtime.close().catch(()=>{process.exitCode=1;}),{once:true});
     }
-  }catch(error){const code=error.code??error.message;console.error(JSON.stringify({error:/^[A-Z][A-Z0-9_]{1,100}$/.test(code)?code:'MAINNET_CONTAINER_STARTUP_FAILED',automaticResend:false}));process.exitCode=1;}
+  }catch(error){const code=error.code??error.message;console.error(JSON.stringify({error:/^[A-Z][A-Z0-9_]{1,100}$/.test(code)?code:'MAINNET_CONTAINER_STARTUP_FAILED',
+    ...(Array.isArray(error.errorClass)?{errorClass:error.errorClass,probedMs:error.probedMs??null}:{}),automaticResend:false}));process.exitCode=1;}
 }

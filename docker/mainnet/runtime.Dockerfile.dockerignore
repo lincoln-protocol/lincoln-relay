@@ -45,6 +45,8 @@ src/phase2-asp/*
 !src/phase2-asp/association-policy.mjs
 !src/phase2-asp/budget.mjs
 !src/phase2-asp/http.mjs
+!src/phase2-asp/immutable-reads.mjs
+!src/phase2-asp/coalesced-reads.mjs
 !src/phase2-asp/ponder-client.mjs
 !src/phase2-asp/publisher-status.mjs
 !src/phase2-asp/quote.mjs
@@ -70,6 +72,7 @@ src/phase2-mainnet/*
 !src/phase2-mainnet/rpc.mjs
 !src/phase2-mainnet/server.mjs
 !src/phase2-mainnet/target-capacity.mjs
+!src/phase2-mainnet/relay-signer-wait.mjs
 !src/phase2-mainnet/service.mjs
 !src/phase2-mainnet/state-delta.mjs
 !src/phase2-mainnet/fee-quotes.mjs

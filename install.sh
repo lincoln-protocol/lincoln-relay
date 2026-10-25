@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # One-command installer for a Lincoln relay on a Linux server.
 #
-#   curl -fsSL https://raw.githubusercontent.com/lincoln-protocol/lincoln-relay/main/install.sh | sudo bash -s -- --pool <id> --domain <host>
+#   curl -fsSL https://raw.githubusercontent.com/lincoln-protocol/lincoln-relay/main/install.sh | sudo bash -s -- --pools <id,id,...> --domain <host>
 #
 # It builds the relay image from source, stages the public release from
 # Lincoln-protocol-core, creates the relay key on this server, writes the
@@ -35,7 +35,7 @@ NODE_IMAGE=node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535
 CADDY_IMAGE=caddy:2.10.0-alpine@sha256:ae4458638da8e1a91aafffb231c5f8778e964bca650c8a8cb23a7e8ac557aa3c
 APP_UID=10001
 
-POOL=
+POOLS=
 DOMAIN=
 OWNER=
 DIR=/opt/lincoln-relay
@@ -49,9 +49,11 @@ RESERVE_ETH=0.001
 YES=0
 
 usage(){ cat <<'EOF'
-Usage: install.sh --pool <id> --domain <host> [options]
+Usage: install.sh --pools <id,id,...> --domain <host> [options]
 
-  --pool <id>            pool this relay serves, e.g. lincoln, eth, usdg, nvda
+  --pools <id,...>       pools this relay serves, comma-separated, e.g. lincoln,eth,usdg (one stake covers them all);
+                         --pool <id> is the same with one pool. The first pool answers at https://<host>/v3/...,
+                         every pool at https://<host>/<id>/v3/...
   --domain <host>        public DNS name pointing at this server; the relay endpoint is https://<host>
   --owner <0x…>          wallet that will register and stake for this relay (signs the relay's consent for it)
   --dir <path>           install directory (default /opt/lincoln-relay)
@@ -74,7 +76,7 @@ trap 'die "failed at line $LINENO: $BASH_COMMAND"' ERR
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pool) POOL=${2:-}; shift 2;;
+    --pool|--pools) POOLS=${POOLS:+$POOLS,}${2:-}; shift 2;;
     --domain) DOMAIN=${2:-}; shift 2;;
     --owner) OWNER=${2:-}; shift 2;;
     --dir) DIR=${2:-}; shift 2;;
@@ -91,7 +93,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[[ $POOL =~ ^[a-z][a-z0-9_-]{0,63}$ ]] || { usage >&2; die "--pool is required (e.g. lincoln)"; }
+IFS=, read -r -a POOL_LIST <<<"$POOLS"
+[ ${#POOL_LIST[@]} -ge 1 ] && [ ${#POOL_LIST[@]} -le 32 ] || { usage >&2; die "--pools is required (e.g. lincoln or lincoln,eth,usdg)"; }
+for p in "${POOL_LIST[@]}"; do [[ $p =~ ^[a-z][a-z0-9_-]{0,63}$ ]] || { usage >&2; die "invalid pool id '$p'"; }; done
+[ "$(printf '%s\n' "${POOL_LIST[@]}" | sort -u | wc -l)" -eq ${#POOL_LIST[@]} ] || die "--pools lists a pool twice"
+POOL=${POOL_LIST[0]}; POOLS=$(IFS=,; echo "${POOL_LIST[*]}"); POOL_COUNT=${#POOL_LIST[@]}
+# One container, one listener per pool: 8797, 8798, ... inside; 19897, 19898, ... on this host's loopback.
+ROLE=api; [ "$POOL_COUNT" -gt 1 ] && ROLE=apis
 [[ $DOMAIN =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || { usage >&2; die "--domain must be a lowercase DNS name, e.g. relay.example.com"; }
 [[ -z $OWNER || $OWNER =~ ^0x[0-9a-fA-F]{40}$ ]] || die "--owner must be a 0x address"
 [[ $DIR == /* ]] || die "--dir must be an absolute path"
@@ -151,7 +159,7 @@ COMMIT=$(git -C "$DIR/src" rev-parse --short=12 HEAD)
 say "Fetching Lincoln-protocol-core ($CORE_TAG, $CORE_COMMIT)"; fetch_pinned "$CORE_REPO" "$DIR/core" "$CORE_COMMIT"
 
 FEES=$DIR/src/config/mainnet-fees
-[ -f "$FEES/service-fees-$POOL.json" ] || die "unknown pool '$POOL'; choose one of: $(ls "$FEES" | sed -n 's/^service-fees-\(.*\)\.json$/\1/p' | tr '\n' ' ')"
+for p in "${POOL_LIST[@]}"; do [ -f "$FEES/service-fees-$p.json" ] || die "unknown pool '$p'; choose from: $(ls "$FEES" | sed -n 's/^service-fees-\(.*\)\.json$/\1/p' | tr '\n' ' ')"; done
 
 say "Building the relay image (lincoln-relay:$COMMIT)"
 IMAGE=lincoln-relay:$COMMIT
@@ -193,13 +201,17 @@ docker run --rm --user $APP_UID:$APP_UID -v "$DIR/src/scripts/set-relayer.mjs:/a
   -v "$DIR/src/config/mainnet-deployed.json:/in.json:ro" -v "$CONFIG.new:/out" "$IMAGE" \
   node /app/scripts/set-relayer.mjs "$ADDRESS" /out/mainnet-deployed.json /in.json >/dev/null
 docker run --rm -i --user $APP_UID:$APP_UID -v "$CONFIG.new:/out" "$IMAGE" node --input-type=module - \
-  "$POOL" "$ADDRESS" "$DOMAIN" "$BUDGET_WEI" "$MAX_FEE_WEI" "$RESERVE_WEI" <<'EOF'
+  "$POOLS" "$ADDRESS" "$DOMAIN" "$BUDGET_WEI" "$MAX_FEE_WEI" "$RESERVE_WEI" <<'EOF'
 import fs from 'node:fs';
-const [pool,address,domain,budgetWei,maxFeePerGasWei,reserveWei]=process.argv.slice(2);
+const [pools,address,domain,budgetWei,maxFeePerGasWei,reserveWei]=process.argv.slice(2);
+const poolIds=pools.split(',');
 const deployed=JSON.parse(fs.readFileSync('/out/mainnet-deployed.json','utf8'));
-const profile=deployed.profiles[pool];if(!profile)throw new Error(`pool ${pool} is not in the deployed profile`);
+for(const id of poolIds)if(!deployed.profiles[id])throw new Error(`pool ${id} is not in the deployed profile`);
+const profile=deployed.profiles[poolIds[0]];
+const providers=new Set(poolIds.map(id=>deployed.profiles[id].registry.provider.toLowerCase()));
+if(providers.size!==1)throw new Error('the listed pools do not share one association-set provider');
 const runtime={schema:'lincoln-mainnet-container/v1',chainId:4663,rpcUrl:'https://rpc.mainnet.chain.robinhood.com/',
-  governanceSafe:'0x9CF17a6E3c75D200f58283A165C442a8A3994555',profileFile:'mainnet-deployed.json',poolIds:[pool],
+  governanceSafe:'0x9CF17a6E3c75D200f58283A165C442a8A3994555',profileFile:'mainnet-deployed.json',poolIds,
   relay:{address,enabled:true,budgetWei,maxFeePerGasWei,reserveWei,maxGas:'5000000'},
   // The official provider publishes the association set; this relay only reads it from the mirror.
   asp:{address:profile.registry.provider,enabled:false,budgetWei:null,maxFeePerGasWei:null,reserveWei:null,maxGas:'500000'},
@@ -207,13 +219,13 @@ const runtime={schema:'lincoln-mainnet-container/v1',chainId:4663,rpcUrl:'https:
   publisher:{policy:'all-current-notes',originScreening:false,intervalSeconds:5,
     publication:{lifetimeSeconds:604800,renewalWindowSeconds:86400,minPublishIntervalSeconds:15,confirmations:2,maxCommitments:10000}},
   network:{allowedHosts:[domain,'127.0.0.1','localhost'],allowedOrigins:[]},
-  serviceFeesFile:{[pool]:`service-fees-${pool}.json`},feeArtifactsFile:'fee-adapters-production.json'};
+  serviceFeesFile:Object.fromEntries(poolIds.map(id=>[id,`service-fees-${id}.json`])),feeArtifactsFile:'fee-adapters-production.json'};
 fs.writeFileSync('/out/runtime.json',JSON.stringify(runtime,null,2)+'\n');
 EOF
 chown -R root:root "$CONFIG.new"; chmod 0644 "$CONFIG.new"/*.json
 docker run --rm -v "$CONFIG.new:/run/config/mainnet:ro" "$IMAGE" node --input-type=module -e \
   "const m=await import('/app/docker/mainnet/start.mjs'),fs=await import('node:fs'),read=f=>JSON.parse(fs.readFileSync('/run/config/mainnet/'+f,'utf8')),c=read('runtime.json');
-   m.planMainnetRuntime(c,{role:'api',poolId:'$POOL',signingFlag:'1'});m.validateMainnetProfiles(read(c.profileFile),c);" \
+   m.planMainnetRuntime(c,{role:'$ROLE',poolId:'$POOL',signingFlag:'1'});m.validateMainnetProfiles(read(c.profileFile),c);" \
   || die "runtime.json failed the relay's own checks"
 rm -rf "$CONFIG.old"; [ -d "$CONFIG" ] && mv "$CONFIG" "$CONFIG.old"; mv "$CONFIG.new" "$CONFIG"
 
@@ -243,7 +255,8 @@ services:
     # This compose project runs exactly one API container on this state directory, so a lock
     # left by a crashed or killed run is stale when the container starts. Without this, one
     # crash would keep the relay down until someone removed the locks by hand.
-    command: ["sh", "-ec", "find /app/.phase1-private/phase2-mainnet -name .service.lock -type f -delete; exec node /app/docker/mainnet/start.mjs api $POOL"]
+    command: ["sh", "-ec", "find /app/.phase1-private/phase2-mainnet -name .service.lock -type f -delete; exec node /app/docker/mainnet/start.mjs $ROLE $POOL"]
+$( [ "$POOL_COUNT" -gt 1 ] && printf '    ports: ["127.0.0.1:19898-%s:8798-%s"]\n' "$((19897+POOL_COUNT-1))" "$((8797+POOL_COUNT-1))" )
     environment:
       PHASE2_MAINNET_ASSOCIATION_SET_MIRROR_URL: "$MIRROR_URL"
       PHASE2_MAINNET_PUBLISHER_STATUS_MIRROR_URL: "$MIRROR_URL"
@@ -273,10 +286,14 @@ services:
       - {type: bind, source: "$SECRETS/relay.keystore.json", target: /run/secrets/mainnet-relay.keystore.json, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: "$SECRETS/relay.password", target: /run/secrets/mainnet-relay.password, read_only: true, bind: {create_host_path: false}}
 EOF
+# https://<host>/<pool>/... reaches that pool's listener; https://<host>/... the first pool, as a single-pool relay.
 { echo "{"; [ -n "$EMAIL" ] && echo "  email $EMAIL"; [ "$TLS" = internal ] && echo "  local_certs"; echo "}"
-  echo "$DOMAIN {"; echo "  encode gzip"; echo "  reverse_proxy api:8797"; echo "}"; } > "$DIR/Caddyfile"
+  echo "$DOMAIN {"; echo "  encode gzip"
+  i=0; for p in "${POOL_LIST[@]}"; do echo "  handle_path /$p/* {"; echo "    reverse_proxy api:$((8797+i))"; echo "  }"; i=$((i+1)); done
+  echo "  handle {"; echo "    reverse_proxy api:8797"; echo "  }"; echo "}"; } > "$DIR/Caddyfile"
 
 # 6. Control script
+POOLS_SPACED=${POOLS//,/ }
 cat > /usr/local/bin/lincoln-relay <<EOF
 #!/usr/bin/env bash
 # Written by install.sh for $DIR.
@@ -300,7 +317,7 @@ case "\${1:-status}" in
       'n=\$(cast call "\$1" "nonces(address)(uint256)" "\$2" --rpc-url "\$4" | cut -d" " -f1)
        cast wallet sign --keystore /k/relay.keystore.json --password-file /k/relay.password --data "{\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"version\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"},{\"name\":\"verifyingContract\",\"type\":\"address\"}],\"RelayConsent\":[{\"name\":\"relay\",\"type\":\"address\"},{\"name\":\"owner\",\"type\":\"address\"},{\"name\":\"nonce\",\"type\":\"uint256\"}]},\"primaryType\":\"RelayConsent\",\"domain\":{\"name\":\"Lincoln Relay Stake Registry\",\"version\":\"2\",\"chainId\":4663,\"verifyingContract\":\"\$1\"},\"message\":{\"relay\":\"\$2\",\"owner\":\"\$3\",\"nonce\":\"\$n\"}}"' \
       sh "\$registry" "$ADDRESS" "\$owner" "$MAINNET_RPC";;
-  health) curl -fsS --max-time 10 "https://$DOMAIN/readyz"$( [ "$TLS" = internal ] && echo ' -k' ); echo;;
+  health) for p in $POOLS_SPACED; do printf '%s: ' "\$p"; curl -fsS --max-time 10 "https://$DOMAIN/\$p/readyz"$( [ "$TLS" = internal ] && echo ' -k' ) || true; echo; done;;
   signing)
     case "\${2:-}" in
       on) docker run --rm --entrypoint sh "$IMAGE_ID" -ec \
@@ -310,7 +327,7 @@ case "\${1:-status}" in
       off) rm -f signing.on; compose up -d api caddy;;
       *) echo "usage: lincoln-relay signing on|off" >&2; exit 2;;
     esac;;
-  status) echo "relay $ADDRESS, pool $POOL, https://$DOMAIN, mode \$(mode)"; compose ps;;
+  status) echo "relay $ADDRESS, pools $POOLS, https://$DOMAIN, mode \$(mode)"; compose ps;;
   *) echo "usage: lincoln-relay [status|up|restart|down|logs|health|address|consent <owner>|signing on|signing off]" >&2; exit 2;;
 esac
 EOF
@@ -331,8 +348,8 @@ CONSENT=
 if [ -n "$OWNER" ] && [ -n "$REGISTRY" ]; then CONSENT=$(/usr/local/bin/lincoln-relay consent "$OWNER") || warn "could not sign the consent; run: lincoln-relay consent $OWNER"; fi
 cat <<EOF
 
-Lincoln relay installed ($COMMIT, pool $POOL)
-  endpoint       https://$DOMAIN
+Lincoln relay installed ($COMMIT, pools $POOLS)
+  endpoint       https://$DOMAIN$( [ "$POOL_COUNT" -gt 1 ] && printf '  (per pool: https://%s/<pool>/v3/...)' "$DOMAIN" )
   relay address  $ADDRESS
 $( if [ -n "$CONSENT" ]; then printf '  consent        %s  (owner %s)' "$CONSENT" "$OWNER"; else printf '  consent        not signed yet (see step 3)'; fi )
   readiness      $ready

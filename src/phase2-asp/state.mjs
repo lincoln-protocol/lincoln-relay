@@ -228,7 +228,9 @@ async function verifyReceipts(client,streams,verifiedThrough=null) {
   const jobs=streams.flatMap(([address,groups])=>Array.from(groups,([transactionHash,group])=>({address,transactionHash,group})))
     .filter(({group})=>verifiedThrough===null||qty(group.meta.blockNumber)>verifiedThrough);
   const receipts=new Map();let cursor=0;
-  await Promise.all(Array.from({length:Math.min(8,jobs.length)},async()=>{
+  // Sixteen receipts in flight per pool: a cold or unmarked read verifies every historical
+  // receipt, and at one round trip each this bounds a restart to minutes, not an hour.
+  await Promise.all(Array.from({length:Math.min(16,jobs.length)},async()=>{
     for(;;){
       const job=jobs[cursor++];if(!job)return;
       const {address,transactionHash,group}=job;

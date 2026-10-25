@@ -26,8 +26,12 @@ On a Linux server (4 GB of RAM or more, ports 80 and 443 open) with a DNS name p
 echo 'https://your-rpc-provider.example/v2/KEY' > rpc-url    # your own Robinhood Chain RPC
 curl -fsSLo install.sh https://raw.githubusercontent.com/lincoln-protocol/lincoln-relay/c0c88ee9cf8d815e5e43e470fd3fcf11d72d0056/install.sh
 echo '31b186d103eb4981536b4791c1b5bb675c85b2b713bd5011c7d45473fe8fb5fb  install.sh' | sha256sum -c - && \
-  sudo bash install.sh --pool lincoln --domain relay.example.com --owner 0xYourOwnerWallet --rpc-url-file rpc-url
+  sudo bash install.sh --pools lincoln,eth --domain relay.example.com --owner 0xYourOwnerWallet --rpc-url-file rpc-url
 ```
+
+`--pools` takes any of the 15 pools, comma-separated; one relay key, one endpoint and one stake cover all of them. Each pool
+answers at `https://<domain>/<pool>/v3/...`; the first listed pool also answers at `https://<domain>/v3/...`, so a
+single-pool relay (`--pool lincoln`) looks exactly as before.
 
 This is the installer of [v0.1.0-rc.2](https://github.com/lincoln-protocol/lincoln-relay/releases/tag/v0.1.0-rc.2). Download it by commit, never from `main`, and read it before you run it as root. Newer releases list their own commit and checksum.
 

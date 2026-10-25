@@ -5,12 +5,21 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {constants} from 'node:fs';
 import {isIP} from 'node:net';
-import {createPublicClient,http,webSocket} from 'viem';
+import {createPublicClient,defineChain,http,webSocket} from 'viem';
 import {MAINNET_RPC} from './signer.mjs';
 import {attachMainnetBroadcastClassification} from './broadcast-errors.mjs';
 
 export const MAINNET_RPC_FILE='/run/secrets/mainnet-rpc-url';
 export const MAINNET_GENESIS_HASH='0xaad15f3d702aaea00caf3e9bb56395efe9127bc3b31b24921abf1eee3409305c';
+// Multicall3 at its canonical cross-chain address, verified deployed on
+// Robinhood Chain. viem aggregates the contract reads a pool sync issues in
+// one tick (root, leaf index, policy, caps, governance window) into one
+// aggregate3 eth_call at the same pinned block: one billed request per batch
+// instead of one per getter, with identical per-call decoding and reverts.
+export const MAINNET_MULTICALL3='0xcA11bde05977b3631167028862bE2a173976CA11';
+const MAINNET_READ_BATCH={multicall:{batchSize:32768,wait:0}};
+const ROBINHOOD_CHAIN=defineChain({id:4663,name:'Robinhood Chain',nativeCurrency:{name:'Ether',symbol:'ETH',decimals:18},
+  rpcUrls:{default:{http:[MAINNET_RPC]}},contracts:{multicall3:{address:MAINNET_MULTICALL3}}});
 const fail=code=>Object.assign(new Error(code),{code});
 const need=(ok,code)=>{if(!ok)throw fail(code);};
 const own=(value,key)=>{try{return value&&typeof value==='object'?Object.getOwnPropertyDescriptor(value,key)?.value:undefined;}catch{return undefined;}};
@@ -143,14 +152,20 @@ export async function assertMainnetRPCIdentity(client,{expectedGenesisHash=MAINN
   need(await client.getChainId()===4663&&(await client.getBlock({blockNumber:0n})).hash===MAINNET_GENESIS_HASH,'MAINNET_RUNTIME_CHAIN_IDENTITY_MISMATCH');
 }
 
+/** PHASE2_MAINNET_RPC_BATCH=0 turns the JSON-RPC batch lane off, so concurrent reads
+ * travel as concurrent single requests. Providers that answer a batch's items one
+ * after another (dRPC) make a batch of sixteen receipts take sixteen round trips;
+ * the same reads as single requests run in parallel and cost the same per item.
+ * The default stays on for providers that run batch items in parallel. */
 export function mainnetRPCTransportOptions(env={}){
   need(env.PHASE2_MAINNET_RPC_WEBSOCKET===undefined||['0','1'].includes(env.PHASE2_MAINNET_RPC_WEBSOCKET),'MAINNET_RPC_WEBSOCKET_INVALID');
-  return {batch:true,webSocket:env.PHASE2_MAINNET_RPC_WEBSOCKET==='1'};
+  need(env.PHASE2_MAINNET_RPC_BATCH===undefined||['0','1'].includes(env.PHASE2_MAINNET_RPC_BATCH),'MAINNET_RPC_BATCH_INVALID');
+  return {batch:env.PHASE2_MAINNET_RPC_BATCH!=='0',webSocket:env.PHASE2_MAINNET_RPC_WEBSOCKET==='1'};
 }
 
 export async function createMainnetRuntimeClient({env=process.env,expectedGenesisHash=MAINNET_GENESIS_HASH}={}){
   const {url}=await resolveMainnetRPC({env});
-  const client=createPublicClient({transport:mainnetRPCTransport(url,mainnetRPCTransportOptions(env)),cacheTime:0});
+  const client=createPublicClient({chain:ROBINHOOD_CHAIN,transport:mainnetRPCTransport(url,mainnetRPCTransportOptions(env)),cacheTime:0,batch:MAINNET_READ_BATCH});
   Object.defineProperty(client,'close',{value:async()=>{await client.transport.close?.();},enumerable:false});
   await assertMainnetRPCIdentity(client,{expectedGenesisHash});
   return client;

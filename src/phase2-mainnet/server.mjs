@@ -22,6 +22,8 @@ import {normalizeGasPricingPolicy} from './fee-quotes.mjs';
 import {createTwapPriceSource} from './twap-prices.mjs';
 import {createPublisherStatusLoader} from '../phase2-asp/publisher-status.mjs';
 import {createPhase2PonderClient} from '../phase2-asp/ponder-client.mjs';
+import {withImmutableReadCache} from '../phase2-asp/immutable-reads.mjs';
+import {withCoalescedReads} from '../phase2-asp/coalesced-reads.mjs';
 
 const ROOT=fileURLToPath(new URL('../../',import.meta.url));
 const need=(ok,code)=>{if(!ok)throw Object.assign(new Error(code),{code});};
@@ -146,14 +148,21 @@ export async function startMainnetASPRuntime(env=process.env,overrides={}){
   // transaction can mint a private, exact-environment, single-use capability.
   const {root,poolId,profile,serviceFeePolicy,gasPricingPolicy,runtimeArtifacts,routes,points,signingEnabled,maxGas,host,port,networkPolicy,hasLedgerConfiguration}=runtimeTickets.consume(overrides.preparedRuntime,env);
   const rpcClient=overrides.client??await createMainnetRuntimeClient({env,expectedGenesisHash:profile.genesisHash});
-  const client=env.PHASE2_ASP_PONDER_URL?createPhase2PonderClient({client:rpcClient,profile,baseURL:env.PHASE2_ASP_PONDER_URL,
-    mode:'logs',fallbackToRpc:env.PHASE2_ASP_PONDER_FALLBACK!=='reject'}):rpcClient;
+  // State syncs reuse the genesis header and verified runtime code between
+  // runs (immutable-reads.mjs); the signer and price feed keep the plain client.
+  // A multi-pool container passes one shared wrapper over its shared client, so
+  // the roster's same-moment reads coalesce across pools, not only within one.
+  need(overrides.stateReads===undefined||overrides.client!==undefined&&typeof overrides.stateReads?.coalescedReadStatus==='function','MAINNET_STATE_READS_INVALID');
+  const stateReads=overrides.stateReads??withCoalescedReads(withImmutableReadCache(rpcClient));
+  const client=env.PHASE2_ASP_PONDER_URL?createPhase2PonderClient({client:stateReads,profile,baseURL:env.PHASE2_ASP_PONDER_URL,
+    mode:'logs',fallbackToRpc:env.PHASE2_ASP_PONDER_FALLBACK!=='reject'}):stateReads;
   if(overrides.client)await assertMainnetRPCIdentity(client,{expectedGenesisHash:profile.genesisHash});
   const publisherStatusLoader=overrides.publisherStatusLoader??createPublisherStatusLoader({client,profile,
     filename:env.PHASE2_MAINNET_PUBLISHER_STATUS_FILE,mirrorURL:env.PHASE2_MAINNET_PUBLISHER_STATUS_MIRROR_URL,
     minPublishIntervalSeconds:env.PHASE2_MAINNET_MIN_PUBLISH_INTERVAL_SECONDS===undefined?null:Number(env.PHASE2_MAINNET_MIN_PUBLISH_INTERVAL_SECONDS)});
   const executorOptions={client:rpcClient,address:profile.relayer,account:env.PHASE2_MAINNET_KEYSTORE_ACCOUNT,keystoreFile:env.PHASE2_MAINNET_KEYSTORE_FILE,passwordFile:env.PHASE2_MAINNET_PASSWORD_FILE,
-    budgetWei:env.PHASE2_MAINNET_GAS_BUDGET_WEI,maxFeePerGasWei:env.PHASE2_MAINNET_MAX_FEE_PER_GAS_WEI,reserveWei:env.PHASE2_MAINNET_RESERVE_WEI,expectedGenesisHash:profile.genesisHash,root};
+    budgetWei:env.PHASE2_MAINNET_GAS_BUDGET_WEI,maxFeePerGasWei:env.PHASE2_MAINNET_MAX_FEE_PER_GAS_WEI,reserveWei:env.PHASE2_MAINNET_RESERVE_WEI,expectedGenesisHash:profile.genesisHash,root,
+    unknownBroadcastProbeMs:overrides.unknownBroadcastProbeMs??45000};
   const executor=signingEnabled||hasLedgerConfiguration?(overrides.executorGroup===undefined?createMainnetSigner(executorOptions):
     mainnetAPIExecutorFor(overrides.executorGroup,executorOptions)):null;
   const pointsReceipts=points===null?null:{...points,signer:overrides.pointsSigner??createCastTypedDataSigner({address:profile.relayer,
