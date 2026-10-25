@@ -31,7 +31,7 @@ echo '31b186d103eb4981536b4791c1b5bb675c85b2b713bd5011c7d45473fe8fb5fb  install.
 
 `--pools` takes any of the 15 pools, comma-separated; one relay key, one endpoint and one stake cover all of them. Each pool
 answers at `https://<domain>/<pool>/v3/...`; the first listed pool also answers at `https://<domain>/v3/...`, so a
-single-pool relay (`--pool lincoln`) looks exactly as before.
+single-pool relay (`--pool lincoln`) looks exactly as before. `https://<domain>/pools` lists the pools as JSON for the app's relay picker.
 
 This is the installer of [v0.1.0-rc.2](https://github.com/lincoln-protocol/lincoln-relay/releases/tag/v0.1.0-rc.2). Download it by commit, never from `main`, and read it before you run it as root. Newer releases list their own commit and checksum.
 

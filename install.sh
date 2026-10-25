@@ -289,6 +289,8 @@ EOF
 # https://<host>/<pool>/... reaches that pool's listener; https://<host>/... the first pool, as a single-pool relay.
 { echo "{"; [ -n "$EMAIL" ] && echo "  email $EMAIL"; [ "$TLS" = internal ] && echo "  local_certs"; echo "}"
   echo "$DOMAIN {"; echo "  encode gzip"
+  # The app's relay picker reads this list once instead of probing every pool.
+  echo "  handle /pools {"; echo "    header Content-Type application/json"; echo "    respond \`{\"pools\":[$(printf '"%s",' "${POOL_LIST[@]}" | sed 's/,$//')]}\` 200"; echo "  }"
   i=0; for p in "${POOL_LIST[@]}"; do echo "  handle_path /$p/* {"; echo "    reverse_proxy api:$((8797+i))"; echo "  }"; i=$((i+1)); done
   echo "  handle {"; echo "    reverse_proxy api:8797"; echo "  }"; echo "}"; } > "$DIR/Caddyfile"
 
