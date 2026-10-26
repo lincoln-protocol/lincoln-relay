@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # One-command installer for a Lincoln relay on a Linux server.
 #
-#   curl -fsSL https://raw.githubusercontent.com/lincoln-protocol/lincoln-relay/main/install.sh | sudo bash -s -- --pools <id,id,...> --domain <host>
+#   Download this file by its release commit URL, check its sha256 against the release notes (sha256sum -c), read it,
+#   then: sudo bash install.sh --pools <id,id,...> --domain <host> --owner <0x...> --rpc-url-file <file>
+#   Never pipe it from main: main is unpinned and unverified.
 #
 # It builds the relay image from source, stages the public release from
 # Lincoln-protocol-core, creates the relay key on this server, writes the
